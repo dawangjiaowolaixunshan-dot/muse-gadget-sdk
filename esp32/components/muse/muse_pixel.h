@@ -62,3 +62,7 @@ void muse_pixel_set_size(int px);
  * image never has to exist in RAM.
  */
 void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1);
+
+/* True to have the UI redraw the whole canvas (when *changed) instead of the
+ * cells that changed; muse_ui.c's weak default says false. */
+bool muse_pixel_whole_frame(bool *changed);

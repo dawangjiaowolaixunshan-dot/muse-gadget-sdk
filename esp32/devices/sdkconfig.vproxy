@@ -1,0 +1,28 @@
+# VMess relay (components/vproxy): load last, after the board overlay.
+# Each relayed connection holds three sockets (the app's, the accepted
+# loopback one and the one to the node), and the loopback carries a full TCP
+# window, so give lwIP room for both.
+CONFIG_LWIP_MAX_SOCKETS=20
+CONFIG_LWIP_MAX_ACTIVE_TCP=24
+CONFIG_LWIP_LOOPBACK_MAX_PBUFS=16
+
+# Ask the Muse daemon for its identity (name, and the avatar we want to show).
+CONFIG_HOMEHUB_SHOW_AGENT_NAME=y
+
+# Internal RAM is what this board runs out of (the Muse VM lookup task failed
+# to start). The StopWatch, with the same panel, already does this.
+CONFIG_HOMEHUB_SETUP_TASKS_IN_PSRAM=y
+
+# The 1.75C overlay leaves Link just over the 16 KB of DMA RAM it needs to
+# send link.register; the relay's sockets would push it under. Win it back:
+# smaller per-socket mailboxes, and one RX / two TX Wi-Fi buffers fewer
+# (the RX block-ack window stays within twice the RX buffers).
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=7
+CONFIG_ESP_WIFI_RX_BA_WIN=14
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=6
+
+# Muse answers in Chinese here: draw it with Noto Sans SC (about 910 KB of
+# flash, no RAM) instead of boxes.
+CONFIG_MUSE_CJK_FONT=y
+CONFIG_MUSE_CJK_FONT_NOTO=y

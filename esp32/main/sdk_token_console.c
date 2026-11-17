@@ -29,6 +29,10 @@
 #include "soc/soc_caps.h"
 
 #include "identity.h"
+#include "vproxy.h"
+#include "noise_control.h"
+#include "freertos/semphr.h"
+#include "freertos/idf_additions.h"
 
 // The chip's own USB port, where it has one and the log goes to it.
 #define USJ_CONSOLE (SOC_USB_SERIAL_JTAG_SUPPORTED && \
@@ -43,7 +47,112 @@ static const char *TAG = "link.sdk_token";
 // A command line: '>', the command and a token, with room to spare.
 #define COMMAND_LINE_MAX 96
 
+
+// Temporary: >avprobe=<VM path> logs the first bytes of a file on the VM, to
+// see what the avatar images are (format and size).
+static void avprobe_cb(void *ctx, int status, const uint8_t *data, size_t len, bool end) {
+    (void)ctx;
+    char hex[3 * 48 + 1] = {0};
+    for (size_t i = 0; i < len && i < 48; i++) sprintf(hex + 3 * i, "%02x ", data[i]);
+    printf("@avprobe status=%d len=%u end=%d %s\n", status, (unsigned)len, end, hex);
+    fflush(stdout);
+}
+
+void avprobe_path(const char *vm_path) {
+    static EXT_RAM_BSS_ATTR char path[4][300];
+    static int n;
+    char *p = path[n++ & 3];
+    snprintf(p, 300, "/fs/raw/%s", vm_path);
+    const char *headers[] = {"Range", "bytes=0-63", NULL};
+    int64_t id = noise_ctrl_req_open("GET", p, headers, true, avprobe_cb, NULL);
+    printf("@avprobe open %lld %s\n", (long long)id, vm_path);
+    fflush(stdout);
+}
+
+static bool avprobe_command(const char *line) {
+    if (strncmp(line, "avprobe=", 8) != 0) return false;
+    static EXT_RAM_BSS_ATTR char path[300];
+    snprintf(path, sizeof(path), "/fs/raw/%s", line + 8);
+    const char *headers[] = {"Range", "bytes=0-63", NULL};
+    int64_t id = noise_ctrl_req_open("GET", path, headers, true, avprobe_cb, NULL);
+    printf("@avprobe open %lld\n", (long long)id);
+    fflush(stdout);
+    return true;
+}
+
+
+// Temporary: >avdump=<VM path> prints a VM file as base64 lines
+// ("@avd <offset> <data>"), to look at the avatar on the computer.
+#include "mbedtls/base64.h"
+#include "esp_heap_caps.h"
+#include "esp_attr.h"
+static struct {
+    SemaphoreHandle_t done;
+    uint8_t *buf;
+    size_t len, cap;
+    int status;
+} s_avd;
+static EXT_RAM_BSS_ATTR char s_avd_path[300];
+
+static void avd_cb(void *ctx, int status, const uint8_t *data, size_t len, bool end) {
+    (void)ctx;
+    if (status != 0) s_avd.status = status;
+    if (len && s_avd.len + len <= s_avd.cap) {
+        memcpy(s_avd.buf + s_avd.len, data, len);
+        s_avd.len += len;
+    }
+    if (end || status < 0) xSemaphoreGive(s_avd.done);
+}
+
+static void avd_task(void *arg) {
+    (void)arg;
+    size_t chunk = noise_ctrl_req_max_body();
+    if (chunk > 8192) chunk = 8192;
+    s_avd.cap = chunk;
+    s_avd.buf = heap_caps_malloc(chunk, MALLOC_CAP_SPIRAM);
+    // PSRAM, not .bss: internal RAM is what this board is short of.
+    char *b64 = heap_caps_malloc(11000 + 16, MALLOC_CAP_SPIRAM);
+    size_t off = 0;
+    for (;;) {
+        char range[48];
+        snprintf(range, sizeof(range), "bytes=%u-%u", (unsigned)off, (unsigned)(off + chunk - 1));
+        const char *headers[] = {"Range", range, NULL};
+        s_avd.len = 0;
+        s_avd.status = 0;
+        if (!noise_ctrl_req_open("GET", s_avd_path, headers, true, avd_cb, NULL)) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        xSemaphoreTake(s_avd.done, pdMS_TO_TICKS(20000));
+        if (s_avd.status != 206 && s_avd.status != 200) break;
+        size_t ol = 0;
+        mbedtls_base64_encode((unsigned char *)b64, 11000 + 16, &ol, s_avd.buf, s_avd.len);
+        b64[ol] = 0;
+        printf("@avd %u %s\n", (unsigned)off, b64);
+        fflush(stdout);
+        off += s_avd.len;
+        if (s_avd.len < chunk) break;
+    }
+    printf("@avd end %u status=%d\n", (unsigned)off, s_avd.status);
+    fflush(stdout);
+    heap_caps_free(s_avd.buf);
+    heap_caps_free(b64);
+    vTaskDeleteWithCaps(NULL);
+}
+
+static bool avdump_command(const char *line) {
+    if (strncmp(line, "avdump=", 7) != 0) return false;
+    snprintf(s_avd_path, sizeof(s_avd_path), "/fs/raw/%s", line + 7);
+    if (!s_avd.done) s_avd.done = xSemaphoreCreateBinary();
+    xTaskCreateWithCaps(avd_task, "avdump", 6144, NULL, 3, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return true;
+}
+
 bool sdk_token_console_command(const char *line) {
+    // The VMess node lines share this console (components/vproxy).
+    if (vproxy_console_command(line)) return true;
+    if (avprobe_command(line)) return true;
+    if (avdump_command(line)) return true;
     if (strncmp(line, COMMAND, strlen(COMMAND)) != 0) return false;
     const char *token = line + strlen(COMMAND);
     if (!identity_sdk_token_valid(token)) {

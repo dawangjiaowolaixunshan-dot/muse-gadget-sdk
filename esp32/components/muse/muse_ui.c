@@ -413,8 +413,25 @@ static int32_t rect_cells(const lv_area_t *r)
     return lv_area_get_width(r) * lv_area_get_height(r);
 }
 
+/*
+ * A Muse drawn from a picture (avatar/muse_pixel.c) rather than flat cells
+ * overrides this to have the whole canvas redrawn, when `changed`.
+ */
+__attribute__((weak)) bool muse_pixel_whole_frame(bool *changed)
+{
+    (void)changed;
+    return false;
+}
+
 static void invalidate_muse(void)
 {
+    bool changed;
+    if (muse_pixel_whole_frame(&changed)) {
+        if (changed) {
+            lv_obj_invalidate(s_canvas);
+        }
+        return;
+    }
     if (!s_cells) {
         lv_obj_invalidate(s_canvas);
         return;
@@ -601,21 +618,41 @@ LV_FONT_DECLARE(muse_font_cjk_16)
 LV_FONT_DECLARE(muse_font_latin_16)
 #endif
 
+#if CONFIG_MUSE_CJK_FONT_NOTO
+/*
+ * LVGL places a fallback glyph on the main font's baseline, and unscii's is
+ * the bottom of its line, but most Noto glyphs hang 1-2 px below their
+ * baseline: the last line of a reply lost its bottom rows. Lift them into
+ * the line.
+ */
+#define NOTO_LIFT_PX 2
+static bool noto_glyph_dsc(const lv_font_t *f, lv_font_glyph_dsc_t *g, uint32_t letter, uint32_t next)
+{
+    if (!CJK_FONT.get_glyph_dsc(f, g, letter, next)) {
+        return false;
+    }
+    g->ofs_y += NOTO_LIFT_PX;
+    return true;
+}
+#endif
+
 /* unscii-16 for captions and replies; with CONFIG_MUSE_CJK_FONT, a copy that
  * falls back to Unifont's 16x16 CJK, the same cell, for what unscii lacks. */
 static const lv_font_t *caption_font(void)
 {
 #if CONFIG_MUSE_CJK_FONT
     static lv_font_t font;
+    static lv_font_t cjk;   /* CJK_FONT, lifted for Noto, falling back to accented letters */
     if (!font.get_glyph_dsc) {
-        font = lv_font_unscii_16;
-        font.fallback = &CJK_FONT;
-#if CONFIG_MUSE_LATIN_FONT
-        static lv_font_t cjk;   /* and a copy of that for accented letters among CJK */
         cjk = CJK_FONT;
-        cjk.fallback = &muse_font_latin_16;
-        font.fallback = &cjk;
+#if CONFIG_MUSE_CJK_FONT_NOTO
+        cjk.get_glyph_dsc = noto_glyph_dsc;
 #endif
+#if CONFIG_MUSE_LATIN_FONT
+        cjk.fallback = &muse_font_latin_16;
+#endif
+        font = lv_font_unscii_16;
+        font.fallback = &cjk;
     }
     return &font;
 #else

@@ -1,0 +1,8 @@
+menu "vproxy"
+    config VPROXY_DUMP_IDENTITY
+        bool "Log the Muse identity reply (debug)"
+        default y
+    config VPROXY_NEVER_SLEEP
+        bool "Treat power as USB always (no battery light sleep)"
+        default y
+endmenu

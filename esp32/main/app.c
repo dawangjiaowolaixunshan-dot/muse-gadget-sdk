@@ -15,6 +15,7 @@
  */
 
 #include "app.h"
+#include "vproxy.h"
 #include "stack_monitor.h"
 
 #include <string.h>
@@ -2742,6 +2743,9 @@ void app_run(void) {
     link_pairing_init(identity_setup_node_id(), identity_device_id(), identity_mac(),
                       app_desc ? app_desc->version : "unknown", identity_sdk_token());
     vm_api_set_sdk_token(identity_sdk_token());
+    // Before any connection: Muse's servers are reached through a VMess node
+    // when one is set (components/vproxy).
+    vproxy_start();
 #if !CONFIG_MUSE_ENABLED
     // Muse boards' own console takes the command (muse_glue_start).
     sdk_token_console_start();

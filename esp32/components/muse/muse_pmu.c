@@ -15,6 +15,7 @@
  */
 
 #include "muse_pmu.h"
+#include "sdkconfig.h"
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -207,6 +208,12 @@ esp_err_t muse_pmu_read_power(muse_power_t *out)
     ESP_RETURN_ON_ERROR(rd(REG_STATUS2, &s2), TAG, "status2");
     bool battery = s1 & (1u << 3);
     out->usb = s1 & (1u << 5);
+#if CONFIG_VPROXY_NEVER_SLEEP
+    /* vproxy build: never take the battery-only path (light sleep), which on
+     * this board with a battery fitted kills the USB console even when it's
+     * plugged in. Costs battery life off USB. */
+    out->usb = true;
+#endif
     out->charging = battery && ((s2 >> 5) & 0x3) == 0x1;
     out->battery_pct = -1;
     out->battery_mv = 0;

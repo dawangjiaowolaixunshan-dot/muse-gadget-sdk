@@ -1323,15 +1323,36 @@ static bool identity_request(esp_tls_t *tls, ClientSession &session,
     return flush_outbound(tls, session, ws_buf);
 }
 
+#if CONFIG_VPROXY_DUMP_IDENTITY
+extern "C" void avprobe_path(const char *vm_path);
+#endif
 static void identity_finish(identity_fetch &f) {
     f.done = true;
     // The daemon wraps the identity: {"ok":true,"result":{"name":...}}.
+#if CONFIG_VPROXY_DUMP_IDENTITY
+    // Temporary: what the identity carries besides the name (avatar assets).
+    for (size_t o = 0; f.body && o < f.len; o += 300) {
+        ESP_LOGI(TAG, "identity[%u]: %.*s", (unsigned)o, (int)(f.len - o < 300 ? f.len - o : 300), f.body + o);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+#endif
     cJSON *root = f.body ? cJSON_ParseWithLength(f.body, f.len) : nullptr;
     cJSON *result = root ? cJSON_GetObjectItem(root, "result") : nullptr;
     cJSON *name = cJSON_GetObjectItem(result, "name");
     if (cJSON_IsString(name) && name->valuestring && *name->valuestring) {
         ESP_LOGI(TAG, "agent name: %s", name->valuestring);
         if (s_agent_name_cb) s_agent_name_cb(name->valuestring);
+#if CONFIG_VPROXY_DUMP_IDENTITY
+        // Temporary: probe the avatar files' headers (format, size).
+        cJSON *av = cJSON_GetObjectItem(result, "avatar");
+        const char *keys[] = {"image_path", "darkmode_image_path"};
+        for (int k = 0; k < 2; k++) {
+            cJSON *ip = cJSON_GetObjectItem(av, keys[k]);
+            if (cJSON_IsString(ip)) avprobe_path(ip->valuestring);
+        }
+        cJSON *cp = cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(av, "call_portraits"), "light"), "image_path");
+        if (cJSON_IsString(cp)) avprobe_path(cp->valuestring);
+#endif
     } else {
         ESP_LOGW(TAG, "identity reply has no name");
     }
@@ -2320,13 +2341,17 @@ static session_result_t run_session(stack_monitor_t *stack) {
                                     tunnel_send_body_inplace, tunnel_reset_stream};
     bool tunnel_opened = false;
     uint64_t last_busy_us = esp_timer_get_time();
+    const uint64_t loop_start_us = last_busy_us;
 
     while (!error && s_running) {
         bool did = false;
 
         // Ask for the agent's name (once) after the register ack, so the
         // request never races registration traffic.
-        if (SHOW_AGENT_NAME && !identity.requested && s_register_acked) {
+        // vproxy build: don't wait for the register ack, which DMA pressure can
+        // hold back for good on this board; the identity read doesn't need it.
+        if (SHOW_AGENT_NAME && !identity.requested
+            && (s_register_acked || esp_timer_get_time() - loop_start_us > 3000000)) {
             identity.requested = true;
             if (!identity_request(tls, session, svc_scratch, env_scratch, ws_buf)) {
                 end_reason = "identity request failed";
