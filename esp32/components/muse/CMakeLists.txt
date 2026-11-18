@@ -82,7 +82,10 @@ if(CONFIG_MUSE_ENABLED)
     # avatar when avatar/muse_pixel.c exists here; this avatar/ is gitignored. The
     # default is in avatar/ at the top of the project.
     file(GLOB custom_avatar CONFIGURE_DEPENDS "${COMPONENT_DIR}/avatar/muse_pixel.c")
-    if(custom_avatar)
+    if(CONFIG_MUSE_BOARD_M5STACK_STOPWATCH AND CONFIG_MUSE_REALTIME_VOICE)
+        list(APPEND srcs "boards/stopwatch_ginger.c")
+        list(APPEND embed "boards/ginger_poses.rgb565")
+    elseif(custom_avatar)
         message(STATUS "Custom avatar: components/muse/avatar/muse_pixel.c")
         list(APPEND srcs "avatar/muse_pixel.c")
     else()
