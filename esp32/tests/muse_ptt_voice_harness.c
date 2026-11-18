@@ -822,6 +822,10 @@ int main(int argc,char **argv) {
         assert(talk_edges==1 && !talk_values[0] && talk_times[0]==180000); /* startup UP tail */
     } else if(scenario>=12 && scenario<=14) {
         assert(tail_reads==(scenario==12?3:scenario==13?1:100));
+        if(scenario==13) {
+            muse_input_event_t next;
+            assert(xQueuePeek(s_queue,&next,0) && next.type==MUSE_PTT_DOWN);
+        }
         assert(!ends && mic_at[3] && !mic_at[4]);
     }
     if(scenario==15) {

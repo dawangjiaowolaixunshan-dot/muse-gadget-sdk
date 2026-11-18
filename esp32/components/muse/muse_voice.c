@@ -1311,15 +1311,20 @@ static void run_call(bool ptt, size_t waking_chunks)
     }
     finish_release(&c);
     /* ENDED closes the network, not the speaker queue. Drain its bounded
-     * tail without reopening the mic; a new press only interrupts this tail. */
+     * tail without reopening the mic; a new PTT press belongs to the next call. */
     if (ended && !c.hung_up && !(ptt && c.held)) {
         int64_t until = esp_timer_get_time() + 2000000;
         while (esp_timer_get_time() < until) {
             muse_input_event_t input;
             bool stop = false;
-            while (xQueueReceive(s_queue, &input, 0) == pdTRUE) {
+            while (xQueuePeek(s_queue, &input, 0) == pdTRUE) {
+                if (ptt && input.type == MUSE_PTT_DOWN && input.epoch == muse_input_call_epoch()) {
+                    stop = true;
+                    break;   /* voice_task consumes this press and its following release */
+                }
+                xQueueReceive(s_queue, &input, 0);
                 muse_state_poke();
-                muse_input_clear_call_pending(input.mark);   /* dropped: it only interrupts the tail */
+                muse_input_clear_call_pending(input.mark);
                 stop |= input.type == MUSE_PTT_DOWN || input.type == MUSE_PTT_END_CALL;
             }
             if (stop || atomic_load(&s_shutdown)) break;
@@ -1475,7 +1480,27 @@ static void voice_task(void *arg)
 #if CONFIG_MUSE_REALTIME_VOICE
         if (ptt) {
             pending_down = false;
-            if (muse_voice_call_ready()) run_call(true, wake ? s_pre_fill : 0);
+            bool ready = muse_voice_call_ready();
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            if (!ready) {
+                muse_state_set_caption("RECONNECTING - KEEP HOLDING");
+                /* Keep only a still-held request. A release or hang-up stays
+                 * queued; speech from before reconnection is never replayed. */
+                int64_t deadline = esp_timer_get_time() + 8000000;
+                muse_input_event_t edge;
+                while (!atomic_load(&s_shutdown) && s_press_input_epoch == muse_input_call_epoch()
+                       && xQueuePeek(s_queue, &edge, 0) != pdTRUE && esp_timer_get_time() < deadline) {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    if (muse_voice_call_ready()) {
+                        ready = !atomic_load(&s_shutdown) && s_press_input_epoch == muse_input_call_epoch()
+                                && xQueuePeek(s_queue, &edge, 0) != pdTRUE;
+                        break;
+                    }
+                }
+                pre_reset();
+            }
+#endif
+            if (ready) run_call(true, wake ? s_pre_fill : 0);
             else {
                 muse_input_clear_call_pending(s_press_mark);
                 if (!muse_wifi_connected()) muse_wifi_apply();
