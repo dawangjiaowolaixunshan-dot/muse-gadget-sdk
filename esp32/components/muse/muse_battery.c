@@ -454,7 +454,15 @@ void muse_battery_note_power(const muse_power_t *p, bool on_battery)
         s_pct_now = p->battery_pct;
         s_mv_now = p->battery_mv;
         note_rest_heap();
-        if (esp_timer_get_time() - s_saved_us >= SAVE_MS * 1000LL) {
+        /* A USB reconnect can reset the StopWatch before the next power poll.
+         * Save short runs too, using existing polls without waking the watch. */
+        int interval_ms = SAVE_MS;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        if (s_saved_us - s_start->at_us < 5 * 60 * 1000000LL) {
+            interval_ms = 60000;
+        }
+#endif
+        if (esp_timer_get_time() - s_saved_us >= interval_ms * 1000LL) {
             persist(true);
         }
     }

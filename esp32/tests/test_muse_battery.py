@@ -290,6 +290,17 @@ class BatteryTest(HarnessCase):
         cleared, = self.run_harness(f"flash {flash}", "k")
         self.assertEqual(cleared, None)
 
+    def test_stopwatch_short_run_survives_usb_reset(self) -> None:
+        binary = build_harness(Path(self.tmp.name) / "short-stopwatch", "CONFIG_MUSE_BOARD_M5STACK_STOPWATCH=1")
+        flash = str(Path(self.tmp.name) / "short-stopwatch-flash")
+        self.run_harness(f"flash {flash}", "t 0", "p 0 97 4150",
+                         "t 60000000", "p 0 97 4148", "s 1 1",
+                         "w 45000000", "t 120000000", "p 0 96 4140", binary=binary)
+        saved, = self.run_harness(f"flash {flash}", "boot 11", "k", binary=binary)
+        self.assertEqual((saved["secs"], saved["battery_pct"], saved["battery_mv"]),
+                         (120, [97, 96], [4150, 4140]))
+        self.assertEqual((saved["screen_off"], saved["slept"]), (50.0, 37.5))
+
     def test_boots_on_battery(self) -> None:
         flash = str(Path(self.tmp.name) / "flash")
         Path(flash).unlink(missing_ok=True)
