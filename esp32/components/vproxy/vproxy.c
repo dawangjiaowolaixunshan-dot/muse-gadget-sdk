@@ -89,6 +89,7 @@ static volatile bool s_running;
 // it asserts. The first getaddrinfo()/connect() anyone makes proves it's up:
 // they set NET, the relay then listens and sets LISTEN.
 static EventGroupHandle_t s_ev;
+#define EV_CLOCK BIT2
 #define EV_NET BIT0
 #define EV_LISTEN BIT1
 static volatile uint32_t s_n_ok, s_n_fail;
@@ -198,7 +199,16 @@ static bool pending_take(uint16_t lport, char *host, uint16_t *dport) {
 
 // ---- time: VMess auth IDs must be within two minutes of the node's clock ----
 
-static bool time_ok(void) { return time(NULL) > TIME_VALID; }
+// Anchor VMess time to a reply received during this boot. The RTC may
+// retain a plausible but stale date across resets.
+static time_t s_ntp_epoch;
+static int64_t s_ntp_last, s_ntp_try;
+
+static bool time_ok(void) { return s_ev && (xEventGroupGetBits(s_ev) & EV_CLOCK); }
+
+static int64_t vmess_time(void) {
+    return s_ntp_epoch + (esp_timer_get_time() - s_ntp_last) / 1000000;
+}
 
 static bool ntp_once(const char *server) {
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM}, *ai = NULL;
@@ -209,13 +219,22 @@ static bool ntp_once(const char *server) {
         struct timeval tv = {.tv_sec = 2};
         lwip_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         uint8_t pkt[48] = {0x23};   // LI 0, version 4, client
-        if (lwip_sendto(fd, pkt, sizeof(pkt), 0, ai->ai_addr, ai->ai_addrlen) == sizeof(pkt) &&
-            lwip_recv(fd, pkt, sizeof(pkt), 0) == sizeof(pkt) && (pkt[0] & 7) == 4) {
+        uint8_t cookie[8];
+        esp_fill_random(cookie, sizeof(cookie));
+        memcpy(pkt + 40, cookie, sizeof(cookie));
+        if (__real_lwip_connect(fd, ai->ai_addr, ai->ai_addrlen) == 0 &&
+            lwip_send(fd, pkt, sizeof(pkt), 0) == sizeof(pkt) &&
+            lwip_recv(fd, pkt, sizeof(pkt), 0) == sizeof(pkt) && (pkt[0] & 7) == 4 &&
+            (pkt[0] >> 6) != 3 && pkt[1] > 0 && pkt[1] < 16 &&
+            memcmp(pkt + 24, cookie, sizeof(cookie)) == 0) {
             uint32_t secs = ((uint32_t)pkt[40] << 24) | ((uint32_t)pkt[41] << 16) |
                             ((uint32_t)pkt[42] << 8) | pkt[43];
             struct timeval now = {.tv_sec = (time_t)(secs - 2208988800u)};
             if (now.tv_sec > TIME_VALID) {
+                s_ntp_epoch = now.tv_sec;
+                s_ntp_last = esp_timer_get_time();
                 settimeofday(&now, NULL);
+                xEventGroupSetBits(s_ev, EV_CLOCK);
                 ok = true;
             }
         }
@@ -225,19 +244,16 @@ static bool ntp_once(const char *server) {
     return ok;
 }
 
-static int64_t s_ntp_last, s_ntp_try;
-
-static void ntp_sync(bool force) {
+static void ntp_sync(void) {
     static const char *servers[] = {"ntp.aliyun.com", "ntp.tencent.com", "cn.pool.ntp.org",
                                     "time.apple.com"};
     int64_t now = esp_timer_get_time();
-    if (!force && time_ok() && now - s_ntp_last < 6LL * 3600 * 1000000) return;
-    if (!force && now - s_ntp_try < 5 * 1000000) return;
+    if (time_ok() && now - s_ntp_last < 6LL * 3600 * 1000000) return;
+    if (s_ntp_try && now - s_ntp_try < 5 * 1000000) return;
     s_ntp_try = now;
     for (size_t i = 0; i < sizeof(servers) / sizeof(servers[0]); i++) {
         if (ntp_once(servers[i])) {
-            s_ntp_last = now;
-            ESP_LOGI(TAG, "time synced from %s", servers[i]);
+            ESP_LOGI(TAG, "time synced from %s: %lld", servers[i], (long long)s_ntp_epoch);
             return;
         }
     }
@@ -352,11 +368,10 @@ static void sess_opened(sess_t *s) {
         sess_close(s, "node refused");
         return;
     }
-    if (!time_ok()) ntp_sync(true);
     if (!time_ok()) { sess_close(s, "clock not set (NTP blocked?)"); return; }
     uint8_t rnd[VMESS_RAND_LEN];
     esp_fill_random(rnd, sizeof(rnd));
-    int r = vmess_begin(&s->vm, s_cfg.ck, s->host, s->dport, (int64_t)time(NULL), rnd, s->a2u,
+    int r = vmess_begin(&s->vm, s_cfg.ck, s->host, s->dport, vmess_time(), rnd, s->a2u,
                         A2U_CAP, &s->a2u_len);
     if (r) {
         ESP_LOGW(TAG, "vmess_begin: %d", r);
@@ -468,7 +483,7 @@ static void relay_task(void *arg) {
     xEventGroupSetBits(s_ev, EV_LISTEN);
     ESP_LOGI(TAG, "relaying through the node on port %u", s_cfg.port);
     for (;;) {
-        ntp_sync(false);
+        ntp_sync();
         fd_set rs, ws;
         FD_ZERO(&rs);
         FD_ZERO(&ws);
