@@ -1,149 +1,97 @@
 #!/usr/bin/env python3
-"""Pack approved 466-square review videos into the StopWatch animation asset.
+"""Pack the 466 px close-up master and clip index into indexed, local-only H.264.
 
-Uses OpenCV, NumPy and Pillow. The input directory is 正面红裙_v2 from
-the avatar project. The output is a zlib block file and its C index.
+Usage: pack_stopwatch_red.py 人物近景 boards [--ffmpeg /path/to/ffmpeg]
+The master is 12 fps with closed lips. The renderer opens the lips from the
+actual speaker envelope. Each clip starts with its own SPS, PPS and IDR.
 """
 import argparse
+import json
 from pathlib import Path
-import zlib
+import re
+import subprocess
 
 import cv2
 import numpy as np
-from PIL import Image
 
 
-W, H, GROUP = 120, 138, 12
-LEFT, TOP, RIGHT, BOTTOM = 133, 85, 371, 357
-CLIPS = {
-    "WAKE_EYES": "01-垂眸抬眼.mp4",
-    "WAKE_NOD": "唤醒-点头招呼.mp4",
-    "IDLE_HAIR": "02-正面对视拢发.mp4",
-    "IDLE_SHIFT": "待机-轻转肩换重心.mp4",
-    "LISTEN_EAR": "倾听-侧耳靠近.mp4",
-    "LISTEN_INTERRUPT": "03-黄键打断转倾听.mp4",
-    "THINK_CHIN": "思考-托腮斟酌.mp4",
-    "THINK_IDEA": "思考-低头再抬眼.mp4",
-    "ANSWER_PALM": "回答-翻掌解释.mp4",
-    "ANSWER_POINT": "回答-食指轻点重点.mp4",
-    "TOUCH_SMILE": "轻触-挑眉侧笑.mp4",
-    "TOUCH_KISS": "轻触-指尖飞吻.mp4",
-    "BYE_SLOW": "告别-正面轻挥手.mp4",
-    "BYE_QUICK": "告别-正面挥手再对视.mp4",
-}
-X, Y = np.meshgrid(np.arange(466), np.arange(466))
-COLORS = 96
+SIZE, FPS, GROUP = 256, 12, 12
+NAMES = ("REST WAKE_EYES WAKE_NOD IDLE_HAIR IDLE_SHIFT LISTEN_EAR LISTEN_INTERRUPT "
+         "THINK_CHIN THINK_IDEA ANSWER_PALM ANSWER_POINT TOUCH_SMILE TOUCH_KISS "
+         "BYE_SLOW BYE_QUICK").split()
 
 
-def mouth(rgb):
-    patch = rgb[175:206, 216:254].astype(np.int16)
-    red = patch[:, :, 0] - patch[:, :, 1]
-    ys, xs = np.where((red > 62) & (patch[:, :, 0] > 69))
-    if len(xs) < 18:
-        raise ValueError("could not locate red lips")
-    return (216 + np.median(xs), 175 + np.median(ys))
+def locate_lips(bgr):
+    # In every approved answering pose this box contains just the mouth and skin.
+    roi = bgr[84:104, 114:142].astype(np.int16)
+    blue, green, red = roi.transpose(2, 0, 1)
+    ys, xs = np.where((red > 92) & (red - green > 78) & (red - blue > 65))
+    if len(xs) < 12:
+        raise ValueError("Lips missing in approved answer frame")
+    return round(114 + np.median(xs)), round(84 + np.median(ys))
 
 
-def clean_frame(rgb, neutral, moving_mouth, center):
-    if moving_mouth:
-        x, y = mouth(rgb)
-        u, v = center
-        dx, dy = x - u, y - v
-        close = cv2.warpAffine(neutral, np.float32([[1, 0, dx], [0, 1, dy]]), (466, 466))
-        distance = np.hypot((X - x) / 16, (Y - y) / 10)
-        mask = np.clip((1.0 - distance) * 3.5, 0, 1)[..., None]
-        rgb = np.uint8(rgb + mask * (close.astype(float) - rgb))
-        xy = round((x - LEFT) * W / (RIGHT - LEFT)), round((y - TOP) * H / (BOTTOM - TOP))
-    else:
-        xy = (0, 0)
-    avatar = rgb[TOP:BOTTOM, LEFT:RIGHT].copy()
-    # Near the top the far-right sliver contains the speaker icon and the
-    # "END CALL" hint. Their positions are supplied by LVGL at runtime.
-    avatar[:88, 226:] = 0
-    avatar[avatar.max(axis=2) < 5] = 0
-    return cv2.resize(avatar, (W, H), interpolation=cv2.INTER_AREA), xy
+def rows(values, fmt=str):
+    return "\n".join("    " + ", ".join(map(fmt, values[i:i+12])) + ","
+                     for i in range(0, len(values), 12))
 
 
-def clips(source, neutral):
-    center = mouth(neutral)
-    for key, name in CLIPS.items():
-        cap = cv2.VideoCapture(str(source / name))
-        count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if cap.get(cv2.CAP_PROP_FPS) != 24 or count < 80:
-            raise ValueError(f"Invalid clip {name}")
-        first = 34 if key == "LISTEN_INTERRUPT" else 0
-        result = []
-        for i in range(count):
-            ok, bgr = cap.read()
-            if not ok or bgr.shape != (466, 466, 3):
-                raise ValueError(f"Invalid frame {i} in {name}")
-            if i >= first and (i - first) % 2 == 0:
-                result.append(clean_frame(bgr[:, :, ::-1], neutral, key.startswith("ANSWER_"), center))
-        cap.release()
-        yield key, result
-
-
-def c_array(values, wrap=12):
-    return "\n".join("    " + ", ".join(str(v) for v in values[i:i + wrap]) + ","
-                     for i in range(0, len(values), wrap))
-
-
-def pack(source, out):
-    neutral = np.asarray(Image.open(source / "正面红丝绸定妆.png").convert("RGB"))
-    frames = dict(clips(source, neutral))
-    rest, _ = clean_frame(neutral, neutral, False, mouth(neutral))
-    frames = {"REST": [(rest, (0, 0))], **frames}
-    strip = Image.fromarray(np.vstack([im for video in frames.values() for im, xy in video[::7]]))
-    palette = [0, 0, 0] + strip.quantize(colors=COLORS - 1).getpalette()[:(COLORS - 1) * 3]
-    ink = Image.new("P", (1, 1))
-    ink.putpalette(palette)
-    rgb = np.array(palette, dtype=np.int16).reshape(-1, 3)
-    red, green, blue = rgb.T.astype(np.uint16)
-    rgb565 = (red >> 3 << 11) | (green >> 2 << 5) | (blue >> 3)
-    blocks, meta, entries = [0], [], []
-    with (out / "stopwatch_red.zlib").open("wb") as stream:
-        for key, sequence in frames.items():
-            entries.append((key, len(meta), len(blocks) - 1, len(sequence)))
-            for base in range(0, len(sequence), GROUP):
-                part = sequence[base:base + GROUP]
-                raw = bytearray()
-                previous = None
-                for image, xy in part:
-                    indexed = np.array(Image.fromarray(image).quantize(palette=ink, dither=0))
-                    indexed[image.max(axis=2) < 5] = 0
-                    if previous is None:
-                        delta = indexed
-                    else:
-                        near = np.max(abs(rgb[previous] - image.astype(np.int16)), axis=2) <= 11
-                        indexed[near] = previous[near]
-                        delta = indexed ^ previous
-                    raw.extend(delta.tobytes())
-                    previous = indexed
-                    meta.append(xy[0] | xy[1] << 8)
-                data = zlib.compress(raw, 9)
-                stream.write(data)
-                blocks.append(stream.tell())
-    with (out / "stopwatch_red_data.h").open("w", encoding="utf-8") as h:
-        h.write("/* Generated by tools/muse/pack_stopwatch_red.py. */\n#pragma once\n\n")
-        h.write(f"#define RED_W {W}\n#define RED_H {H}\n#define RED_GROUP {GROUP}\n")
-        h.write(f"#define RED_X {LEFT - 73}\n#define RED_Y {TOP - 53}\n")
-        h.write(f"#define RED_DRAW_W {RIGHT - LEFT}\n#define RED_DRAW_H {BOTTOM - TOP}\n\n")
-        h.write("typedef struct { uint16_t frame, block, count; } red_clip_t;\n")
-        h.write("enum {\n" + "".join(f"    RED_{name},\n" for name, *_ in entries) + "    RED_COUNT\n};\n")
-        h.write("static const red_clip_t red_clips[RED_COUNT] = {\n")
-        h.write("".join(f"    [RED_{n}] = {{{f}, {b}, {c}}},\n" for n, f, b, c in entries) + "};\n")
-        for kind, name, values in [
-            ("uint16_t", "red_palette", rgb565),
-            ("uint32_t", "red_offsets", blocks),
-            ("uint16_t", "red_mouth", meta),
-        ]:
-            h.write(f"static const {kind} {name}[] = {{\n{c_array(values)}\n}};\n")
-    print(f"{len(CLIPS)} clips, {len(meta)} frames, {blocks[-1]} bytes")
+def pack(source, dest, ffmpeg):
+    counts = json.loads((source / "动作索引.json").read_text())
+    if set(counts) != set(NAMES) or counts["REST"] != 1 or min(counts.values()) < 1:
+        raise ValueError("Missing or empty approved clip")
+    video = cv2.VideoCapture(str(source / "十四段动作母带.mp4"))
+    if video.get(cv2.CAP_PROP_FPS) != FPS or int(video.get(cv2.CAP_PROP_FRAME_COUNT)) != sum(counts.values()):
+        raise ValueError("Master frame count/rate does not match index")
+    blob, offsets, clips, mouth = bytearray(), [0], [], []
+    aud = re.compile(b"\x00\x00\x00\x01\x09")
+    for name in NAMES:
+        count = counts[name]
+        clips.append((name, len(mouth), count))
+        raw = bytearray()
+        for _ in range(count):
+            ok, frame = video.read()
+            if not ok or frame.shape != (466, 466, 3):
+                raise ValueError(f"Invalid source frame in {name}")
+            frame = cv2.resize(frame, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
+            raw.extend(frame.tobytes())
+            x, y = locate_lips(frame) if name.startswith("ANSWER_") else (0, 0)
+            mouth.append(x | y << 8)
+        args = [ffmpeg, "-v","error","-f","rawvideo","-pix_fmt","bgr24","-s",f"{SIZE}x{SIZE}",
+                "-r",str(FPS),"-i","pipe:0","-an","-c:v","libx264","-preset","medium",
+                "-crf","21","-profile:v","baseline","-pix_fmt","yuv420p","-threads","1",
+                "-x264-params",f"aud=1:repeat-headers=1:scenecut=0:keyint={GROUP}:min-keyint={GROUP}:ref=1",
+                "-f","h264","pipe:1"]
+        encoded = subprocess.run(args,input=raw,stdout=subprocess.PIPE,check=True).stdout
+        marks = [m.start() for m in aud.finditer(encoded)]
+        if len(marks) != count or marks[0] != 0:
+            raise ValueError(f"Invalid access-unit boundaries in {name}")
+        for i, start in enumerate(marks):
+            packet = encoded[start:marks[i+1] if i+1<count else len(encoded)]
+            if i % GROUP == 0 and not re.search(b"\x00\x00\x01\x65", packet):
+                raise ValueError(f"Missing fixed-interval keyframe: {name}/{i}")
+            blob.extend(packet)
+            offsets.append(len(blob))
+    video.release()
+    dest.mkdir(parents=True, exist_ok=True)
+    largest = max(b-a for a,b in zip(offsets,offsets[1:]))
+    with (dest / "stopwatch_red_data.h").open("w") as out:
+        out.write("/* Generated by tools/muse/pack_stopwatch_red.py. */\n#pragma once\n\n")
+        out.write(f"#define RED_SIZE {SIZE}\n#define RED_FPS {FPS}\n#define RED_GROUP {GROUP}\n#define RED_PACKET_MAX {largest}\n")
+        out.write("typedef struct { uint16_t frame, count; } red_clip_t;\n")
+        out.write("enum {\n"+"".join(f"    RED_{n},\n" for n in NAMES)+"    RED_COUNT\n};\n")
+        out.write("static const red_clip_t red_clips[RED_COUNT] = {\n")
+        out.write("".join(f"    [RED_{n}] = {{{i}, {count}}},\n" for n,i,count in clips)+"};\n")
+        out.write("static const uint32_t red_offsets[] = {\n"+rows(offsets)+"\n};\n")
+        out.write("static const uint16_t red_mouth[] = {\n"+rows(mouth)+"\n};\n")
+    (dest / "stopwatch_red.h264").write_bytes(blob)
+    print(f"{len(NAMES)-1} motions, {len(mouth)} frames, {len(blob)} bytes; largest packet {largest}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
-    parser.add_argument("output_directory", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--ffmpeg", default="ffmpeg")
     args = parser.parse_args()
-    pack(args.source, args.output_directory)
+    pack(args.source, args.output, args.ffmpeg)

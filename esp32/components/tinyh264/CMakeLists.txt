@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# H.264 constrained baseline decoder for video streaming
-# (CONFIG_MUSE_VIDEO). See README.md.
-if(CONFIG_MUSE_VIDEO)
+# H.264 constrained baseline decoder for video streaming and the offline
+# StopWatch Live portrait. See README.md.
+if(CONFIG_MUSE_VIDEO OR (CONFIG_MUSE_BOARD_M5STACK_STOPWATCH AND CONFIG_MUSE_REALTIME_VOICE))
     file(GLOB srcs "${CMAKE_CURRENT_LIST_DIR}/src/*.c")
     if(CONFIG_MUSE_VIDEO_SIMD_MC)
         # The luma 6-tap filters on the S31's SIMD (h264bsd_reconstruct.c checks them).

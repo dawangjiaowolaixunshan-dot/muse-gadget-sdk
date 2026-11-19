@@ -69,6 +69,12 @@
 
 static const char *TAG = "muse_ui";
 
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
+#define STOPWATCH_PORTRAIT 1
+#else
+#define STOPWATCH_PORTRAIT 0
+#endif
+
 #define METER_SEGS 14
 #define METER_SEG_PX 9
 #define METER_GAP_PX 4
@@ -213,10 +219,6 @@ static lv_obj_t *s_meter[METER_SEGS];
 static lv_obj_t *s_speaker;
 static lv_obj_t *s_speaker_icon;
 static lv_obj_t *s_aux_icon;
-#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
-static lv_obj_t *s_talk_hint_lbl, *s_end_hint_lbl;
-#define CALL_HINT_OUT 26   /* px outwards from the rim icon's x: the 320 px avatar's sparkles reach ~125 */
-#endif
 static lv_obj_t *s_image;   /* display.draw_url, over the face */
 #if CONFIG_MUSE_WATCHER_CAMERA
 static lv_obj_t *s_camera_hint;
@@ -241,6 +243,7 @@ static bool s_meter_visible = true;
 static bool s_avatar_tapped;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 void muse_stopwatch_red_screen(bool asleep);
+bool muse_stopwatch_red_leaving(void);
 #endif
 static int s_ring_value = -1;
 static uint32_t s_caption_version;
@@ -432,7 +435,15 @@ static void invalidate_muse(void)
     bool changed;
     if (muse_pixel_whole_frame(&changed)) {
         if (changed) {
+#if STOPWATCH_PORTRAIT
+            /* The warm backdrop is static outside the avatar's motion area. */
+            lv_area_t canvas;
+            lv_obj_get_coords(s_canvas, &canvas);
+            lv_area_t art = { canvas.x1 + 72, canvas.y1, canvas.x2, canvas.y1 + 432 };
+            lv_obj_invalidate_area(s_canvas, &art);
+#else
             lv_obj_invalidate(s_canvas);
+#endif
         }
         return;
     }
@@ -1363,6 +1374,134 @@ static void on_volume_swipe(lv_event_t *e)
     }
 }
 
+#if STOPWATCH_PORTRAIT
+LV_FONT_DECLARE(stopwatch_face_font);
+static lv_obj_t *s_portrait_footer, *s_portrait_meter, *s_portrait_bars[5];
+
+static void build_portrait_footer(lv_obj_t *face)
+{
+    s_portrait_footer = lv_obj_create(face);
+    lv_obj_remove_style_all(s_portrait_footer);
+    lv_obj_remove_flag(s_portrait_footer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_portrait_footer, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_portrait_footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_portrait_footer, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_portrait_footer, 6, 0);
+    lv_obj_align(s_portrait_footer, LV_ALIGN_CENTER, 0, 174);
+
+    s_portrait_meter = lv_obj_create(s_portrait_footer);
+    lv_obj_remove_style_all(s_portrait_meter);
+    lv_obj_remove_flag(s_portrait_meter, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_portrait_meter, 28, 18);
+    for (int i = 0; i < 5; ++i) {
+        lv_obj_t *bar = lv_obj_create(s_portrait_meter);
+        lv_obj_remove_style_all(bar);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(bar, 4, 4 + i * 3);
+        lv_obj_set_style_radius(bar, 2, 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0xc04c45), 0);
+        lv_obj_align(bar, LV_ALIGN_BOTTOM_LEFT, 6 * i, -1);
+        s_portrait_bars[i] = bar;
+    }
+    lv_obj_set_parent(s_state_lbl, s_portrait_footer);
+    lv_obj_set_size(s_state_lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_letter_space(s_state_lbl, 1, 0);
+    lv_obj_set_style_text_font(s_state_lbl, &stopwatch_face_font, 0);
+    lv_obj_set_style_text_color(s_state_lbl, lv_color_hex(0xffe8c9), 0);
+    lv_label_set_text(s_state_lbl, "我在");
+
+    s_caption_lbl = make_label(face, caption_font(), 0xffe8c9);
+    lv_label_set_long_mode(s_caption_lbl, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_size(s_caption_lbl, 242, 2 * (lv_font_get_line_height(caption_font()) + CAPTION_LINE_SPACE));
+    lv_obj_set_style_text_line_space(s_caption_lbl, CAPTION_LINE_SPACE, 0);
+    lv_obj_align(s_caption_lbl, LV_ALIGN_CENTER, 0, 156);
+    lv_obj_add_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
+static const char *portrait_state(muse_mode_t mode, muse_voice_view_t call)
+{
+    switch (call) {
+    case MUSE_VOICE_VIEW_CONNECTING: return "正在接通";
+    case MUSE_VOICE_VIEW_READY: return "按住黄键说话";
+    case MUSE_VOICE_VIEW_LISTENING: return "我在听";
+    case MUSE_VOICE_VIEW_WORKING:
+    case MUSE_VOICE_VIEW_THINKING: return "想一想";
+    case MUSE_VOICE_VIEW_SPEAKING: return "正在回答";
+    case MUSE_VOICE_VIEW_ENDING: return "";
+    default: break;
+    }
+    switch (mode) {
+    case MUSE_MODE_LISTENING: return "我在听";
+    case MUSE_MODE_THINKING: return "想一想";
+    case MUSE_MODE_SPEAKING: return "正在回答";
+    case MUSE_MODE_ERROR: return "遇到问题";
+    case MUSE_MODE_OFF: return "";
+    default: break;
+    }
+    if (muse_stopwatch_red_leaving()) return "";
+    if (!strcmp(s_idle_name, "SET UP WI-FI")) return "请设置网络";
+    if (!strcmp(s_idle_name, "NO WI-FI") || !strcmp(s_idle_name, "WI-FI OFF")) return "网络已断开";
+    if (strcmp(s_idle_name, "READY")) return "正在连接";
+    muse_power_t p = muse_state_power();
+    return !p.usb && p.battery_pct >= 0 && p.battery_pct <= 15 ? "电量低" : "我在";
+}
+
+static void update_portrait(muse_mode_t mode, float now)
+{
+    static char caption[MUSE_CAPTION_MAX];
+    static float problem_until;
+    static int last_lit = -1;
+    bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
+    if (fresh) {
+        bool failed = !strcmp(caption, "CALL FAILED") || !strcmp(caption, "LOST CONNECTION TO MUSE") ||
+                      !strcmp(caption, "MUSE DIDN'T ANSWER") || !strcmp(caption, "MUSE DIDN'T TAKE THE CALL");
+        problem_until = failed ? now + 4.0f : 0;
+    }
+    muse_voice_view_t call = muse_voice_call_view();
+    const char *text = portrait_state(mode, call);
+    if (mode == MUSE_MODE_IDLE && call == MUSE_VOICE_VIEW_NONE && now < problem_until) text = "通话已断开";
+    bool ready = call == MUSE_VOICE_VIEW_NONE || call == MUSE_VOICE_VIEW_READY;
+    bool hint = ready && mode == MUSE_MODE_IDLE && muse_state_hint_pending();
+    if (hint && !strcmp(caption, "SPEAKER OFF")) {
+        text = "已静音";
+        hint = false;
+    } else if (hint && !strcmp(caption, "SPEAKER ON")) {
+        text = "声音已开启";
+        hint = false;
+    }
+    bool listen = call == MUSE_VOICE_VIEW_LISTENING || (call == MUSE_VOICE_VIEW_NONE && mode == MUSE_MODE_LISTENING);
+    bool speak = call == MUSE_VOICE_VIEW_SPEAKING || (call == MUSE_VOICE_VIEW_NONE && mode == MUSE_MODE_SPEAKING);
+    bool reading = !muse_settings_speaker_on() && (speak || mode == MUSE_MODE_THINKING) &&
+                   call != MUSE_VOICE_VIEW_CONNECTING && call != MUSE_VOICE_VIEW_ENDING;
+    bool show_caption = caption[0] && (hint || mode == MUSE_MODE_ERROR || reading);
+    if (show_caption && (fresh || lv_obj_has_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN))) {
+#if CONFIG_MUSE_CJK_FONT || CONFIG_MUSE_LATIN_FONT || CONFIG_MUSE_LATEST_REPLY
+        const lv_font_t *font = caption_font_for(caption);
+#else
+        const lv_font_t *font = caption_font();
+#endif
+        answer_layout_t box = { .font = font, .scale = 1, .w = 242,
+                                .h = 2 * lv_font_get_line_height(font) + CAPTION_LINE_SPACE };
+        lv_obj_set_style_text_font(s_caption_lbl, font, 0);
+        lv_label_set_text(s_caption_lbl, live_caption_tail(caption, &box));
+    }
+    lv_obj_set_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN, !show_caption);
+    lv_obj_set_flag(s_portrait_footer, LV_OBJ_FLAG_HIDDEN, !*text || show_caption);
+    if (show_caption || !*text) return;
+    if (strcmp(lv_label_get_text(s_state_lbl), text)) lv_label_set_text(s_state_lbl, text);
+    lv_obj_set_flag(s_portrait_meter, LV_OBJ_FLAG_HIDDEN, !listen && !speak);
+    if (listen || speak) {
+        int lit = (int)lroundf(s_level * 5.0f);
+        if (lit != last_lit) {
+            for (int i = 0; i < 5; ++i)
+                lv_obj_set_style_bg_color(s_portrait_bars[i], lv_color_hex(i < lit ? 0xff6355 : 0xb44038), 0);
+            last_lit = lit;
+        }
+    }
+}
+#endif
+
 static void build_screen(void)
 {
 #if CONFIG_MUSE_LATIN_FONT
@@ -1411,7 +1550,7 @@ static void build_screen(void)
         }
     }
 
-    if (!s_small && muse_board->no_ring) {
+    if (!STOPWATCH_PORTRAIT && !s_small && muse_board->no_ring) {
         /* A square panel: progress along the bottom edge, as the compact
          * layout has it, rather than a circle around Muse. */
         s_bar = lv_obj_create(face);
@@ -1419,7 +1558,7 @@ static void build_screen(void)
         lv_obj_set_size(s_bar, 0, 6);
         lv_obj_set_style_bg_opa(s_bar, LV_OPA_COVER, 0);
         lv_obj_align(s_bar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-    } else if (!s_small) {
+    } else if (!STOPWATCH_PORTRAIT && !s_small) {
         /* Progress ring around the bezel. */
         int d = (s_w < s_h ? s_w : s_h) - 8;
         s_ring = lv_arc_create(face);
@@ -1459,6 +1598,7 @@ static void build_screen(void)
 #endif
 
     /* The character. */
+    if (STOPWATCH_PORTRAIT) s_big_y = 0;
     muse_image_init();
     s_canvas = lv_image_create(face);
     lv_image_set_src(s_canvas, &s_muse_src);
@@ -1514,6 +1654,13 @@ static void build_screen(void)
     /* Same rule as the state label: a square 128 px screen centres Muse over
      * these rows, so there's nowhere to put this without covering the face. */
     lv_obj_set_flag(s_name_lbl, LV_OBJ_FLAG_HIDDEN, s_small && !s_tall && s_h < 200);
+
+#if STOPWATCH_PORTRAIT
+    lv_obj_add_flag(status, LV_OBJ_FLAG_HIDDEN);
+    build_portrait_footer(face);
+    muse_state_set_page(2 * 242 / 16 - 1, 2);
+    return;
+#endif
 
     s_caption_lbl = make_label(face, font_pick(caption_font(), &lv_font_unscii_8), COLOR_CAPTION);
     if (s_small) {
@@ -1811,27 +1958,12 @@ static void build_overlays(void)
     lv_obj_add_event_cb(s_camera_hint, on_camera_hint_clicked, LV_EVENT_CLICKED, NULL);
 #endif
 
-    if (muse_board->rim_controls) {
+    if (muse_board->rim_controls && !STOPWATCH_PORTRAIT) {
         /* Dedicated ownership: legacy chrome/reply hides must never claim it. */
         s_ptt_hint = make_mic(scr, 26);
         lv_obj_align(s_ptt_hint, muse_board->talk_hint.align, muse_board->talk_hint.x, muse_board->talk_hint.y);
         s_spk_hint = make_control_icon(scr, &muse_board->speaker_hint, LV_SYMBOL_VOLUME_MID, 0xffd060);
         s_pwr_hint = make_control_icon(scr, &muse_board->power_hint, LV_SYMBOL_POWER, 0xff8080);
-#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
-        /* During a push-to-talk call: what yellow does now, and that blue
-         * hangs up. Under each rim icon, pushed out towards the rim, clear of
-         * the avatar and its sparkles (CALL_HINT_OUT). */
-        const muse_button_hint_t *t = &muse_board->talk_hint, *k = &muse_board->speaker_hint;
-        s_talk_hint_lbl = make_label(scr, &lv_font_montserrat_14, 0xffdc55);
-        s_end_hint_lbl = make_label(scr, &lv_font_montserrat_14, 0x70baff);
-        lv_obj_set_style_text_align(s_talk_hint_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_align(s_end_hint_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(s_talk_hint_lbl, t->align, t->x + (t->x < 0 ? -CALL_HINT_OUT : CALL_HINT_OUT), t->y + 36);
-        lv_obj_align(s_end_hint_lbl, k->align, k->x + (k->x < 0 ? -CALL_HINT_OUT : CALL_HINT_OUT), k->y + 36);
-        lv_label_set_text(s_end_hint_lbl, "END CALL");
-        lv_obj_add_flag(s_talk_hint_lbl, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_end_hint_lbl, LV_OBJ_FLAG_HIDDEN);
-#endif
         update_control_hints(MUSE_MODE_BOOT);
     }
 
@@ -1979,7 +2111,7 @@ static void update_chrome(float now)
         bool subpage = muse_settings_ui_in_subpage();
         s_swipe_enabled = !page || !subpage;
         update_tileview_swipe();
-        bool hide_dots = page && subpage;
+        bool hide_dots = (page && subpage) || (STOPWATCH_PORTRAIT && s_face_active);
 #if CONFIG_MUSE_LATEST_REPLY
         int selected = page ? 2 : lv_tileview_get_tile_active(s_tv) == s_face ? 1 : 0;
 #else
@@ -2180,6 +2312,10 @@ static void set_full_reply(bool on)
 
 static void update_status(muse_mode_t mode, float now)
 {
+#if STOPWATCH_PORTRAIT
+    update_portrait(mode, now);
+    return;
+#endif
     uint32_t accent = muse_pixel_accent(mode);
     const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
     if (mode == MUSE_MODE_THINKING && muse_voice_call_view() == MUSE_VOICE_VIEW_WORKING) {
@@ -2187,21 +2323,6 @@ static void update_status(muse_mode_t mode, float now)
         uint32_t working = muse_pixel_working_accent();
         if (working) accent = working;   /* the ring and label match the working avatar */
     }
-#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
-    const char *call_name = muse_voice_call_label();
-    const char *hint = muse_voice_call_hint();
-    if (call_name) name = call_name;
-    if (s_talk_hint_lbl) {
-        /* Hidden over the settings rows, as the rim icons are, and once the
-         * call is ending (an empty hint). */
-        bool show = hint && hint[0] && !(s_tv && lv_tileview_get_tile_active(s_tv) == s_settings);
-        lv_obj_set_flag(s_talk_hint_lbl, LV_OBJ_FLAG_HIDDEN, !show);
-        lv_obj_set_flag(s_end_hint_lbl, LV_OBJ_FLAG_HIDDEN, !show);
-        if (show && strcmp(lv_label_get_text(s_talk_hint_lbl), hint)) {
-            lv_label_set_text(s_talk_hint_lbl, hint);
-        }
-    }
-#endif
 
     if (name != s_shown_name) {
         const char *shown = muse_lang_status(name);
@@ -2392,10 +2513,27 @@ void muse_ui_bench_page(bool settings)
 static void send_snapshot(void)
 {
 #if LV_USE_SNAPSHOT
+#if STOPWATCH_PORTRAIT
+    /* The snapshot only goes to USB. Allocate ordinary PSRAM, not a draw
+     * buffer from the panel's more restricted DMA allocator. */
+    lv_draw_buf_t snapshot;
+    uint32_t stride = lv_draw_buf_width_to_stride(s_w, LV_COLOR_FORMAT_RGB565);
+    size_t size = stride * s_h;
+    void *pixels = heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    lv_draw_buf_t *buf = &snapshot;
+    if (!pixels || lv_draw_buf_init(buf, s_w, s_h, LV_COLOR_FORMAT_RGB565, stride, pixels, size) != LV_RESULT_OK ||
+        lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, buf) != LV_RESULT_OK) {
+        ESP_LOGW(TAG, "StopWatch snapshot allocation/draw failed, largest PSRAM block %zu",
+                 heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        heap_caps_free(pixels);
+        return;
+    }
+#else
     lv_draw_buf_t *buf = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
     if (!buf) {
         return;
     }
+#endif
     enum { RAW = 144 };   /* lines must fit the driver's 256-byte TX ring */
     char hdr[48];
     int n = snprintf(hdr, sizeof(hdr), "\nSNAP BEGIN %d %d %d\n", (int)buf->header.w, (int)buf->header.h, RAW);
@@ -2419,7 +2557,11 @@ static void send_snapshot(void)
     }
     muse_console_write("SNAP END\n", 9);
 done:
+#if STOPWATCH_PORTRAIT
+    heap_caps_free(pixels);
+#else
     lv_draw_buf_destroy(buf);
+#endif
 #else
     muse_console_write("\nSNAP OFF\n", 10);   /* so snap.py can say why */
 #endif
@@ -2567,6 +2709,7 @@ esp_err_t muse_ui_start(void)
         s_dy = 0;
     }
 
+    if (STOPWATCH_PORTRAIT) s_canvas_px = s_w;
     lv_display_t *disp = muse_board->display_start(&s_indev);
     if (!disp) {
         ESP_LOGE(TAG, "display init failed");
