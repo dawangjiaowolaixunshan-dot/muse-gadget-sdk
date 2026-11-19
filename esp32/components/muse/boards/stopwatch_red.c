@@ -12,7 +12,7 @@
 #include "muse_yuv.h"
 #include "stopwatch_red_data.h"
 
-#define PANEL 466
+#define PANEL RED_PANEL
 #define BLEND_S 0.16f
 #define IDLE_GAP_S 16.0f
 
@@ -49,7 +49,6 @@ static int s_lip_x, s_lip_y;
 static muse_mode_t s_prev_mode = MUSE_MODE_COUNT;
 static int s_frame = -1;
 static float s_started, s_next_idle;
-static uint16_t s_expand_map[PANEL];
 
 static unsigned s_total_frames, s_clip_frames, s_dropped, s_decode_max_us;
 
@@ -71,7 +70,6 @@ static int min_int(int a, int b)
 void muse_pixel_set_size(int px)
 {
     (void)px;   /* The portrait and its footer always share one fixed 466 px camera. */
-    for (int i = 0; i < PANEL; ++i) s_expand_map[i] = i * RED_SIZE / PANEL;
     s_dirty = true;
 }
 
@@ -102,9 +100,9 @@ static bool decode(int target)
     }
     unsigned elapsed = (unsigned)(esp_timer_get_time() - start);
     if (elapsed > s_decode_max_us) s_decode_max_us = elapsed;
-    uint16_t mouth = red_mouth[red_clips[s_clip].frame + last];
-    s_lip_x = (mouth & 255) * PANEL / RED_SIZE;
-    s_lip_y = (mouth >> 8) * PANEL / RED_SIZE;
+    uint32_t mouth = red_mouth[red_clips[s_clip].frame + last];
+    s_lip_x = (uint16_t)mouth;
+    s_lip_y = mouth >> 16;
     if (s_frame >= 0) s_dropped += last - s_frame - 1;
     s_frame = last;
     return true;
@@ -260,7 +258,7 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
             memset(dst, 0, bytes);
             continue;
         }
-        int sy = s_expand_map[y];
+        int sy = red_ymap[y];
         int dy = y - s_lip_y;
         bool mouth = s_lips && dy >= -height-2 && dy <= height+2;
         if (sy == previous_sy && !mouth && !previous_mouth) {
@@ -270,11 +268,11 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
             const uint16_t *old = s_old + sy * RED_SIZE;
             if (s_blending) {
                 for (int x = x0; x <= x1; ++x) {
-                    int sx = s_expand_map[x];
+                    int sx = red_xmap[x];
                     dst[x-x0] = blend565(old[sx], row[sx], s_blend_weight);
                 }
             } else {
-                for (int x = x0; x <= x1; ++x) dst[x-x0] = row[s_expand_map[x]];
+                for (int x = x0; x <= x1; ++x) dst[x-x0] = row[red_xmap[x]];
             }
         }
         previous_sy = sy;
@@ -282,13 +280,13 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
         if (!mouth) continue;
         int start = x0 > s_lip_x-width ? x0 : s_lip_x-width;
         int stop = min_int(x1, s_lip_x+width);
-        const uint16_t *lip_row = s_shown + s_expand_map[y + (dy < 0 ? 1 : -1)] * RED_SIZE;
+        const uint16_t *lip_row = s_shown + red_ymap[y + (dy < 0 ? 1 : -1)] * RED_SIZE;
         for (int x = start; x <= stop; ++x) {
             int dx = x - s_lip_x;
             int opening = height * (width*width - dx*dx) / (width*width);
             int distance = dy < 0 ? -dy : dy;
             if (distance > opening+1) continue;
-            uint16_t color = distance < opening ? 0x3823 : lip_row[s_expand_map[x]];
+            uint16_t color = distance < opening ? 0x3823 : lip_row[red_xmap[x]];
             dst[x-x0] = blend565(dst[x-x0], color, distance < opening ? 14 : 8);
         }
     }
