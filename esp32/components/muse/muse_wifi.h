@@ -61,6 +61,8 @@ typedef struct {
 esp_err_t muse_wifi_start(void);
 /* Re-reads on/off and credentials from settings and (re)connects. */
 void muse_wifi_apply(void);
+/* A talk press asks for a fresh scan if disconnected. */
+void muse_wifi_retry_now(void);
 void muse_wifi_status(muse_wifi_status_t *out);
 bool muse_wifi_connected(void);
 typedef enum {

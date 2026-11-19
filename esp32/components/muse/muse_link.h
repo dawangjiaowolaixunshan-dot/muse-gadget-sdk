@@ -57,6 +57,7 @@ typedef struct {
     void (*wifi_get)(char *ssid, char *pass);     /* MUSE_SSID_MAX+1 / MUSE_PASS_MAX+1; pass may be NULL */
     void (*wifi_set)(const char *ssid, const char *pass);
     esp_err_t (*wifi_scan)(void);
+    void (*wifi_retry_now)(void);             /* explicit retry from the talk button */
     bool (*wifi_scanning)(void);
     int (*wifi_scan_results)(muse_wifi_ap_t *out, int max, uint32_t *gen);
     void (*ble_apply)(void);                      /* BLE phone setup setting changed */

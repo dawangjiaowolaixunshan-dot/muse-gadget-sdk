@@ -67,6 +67,8 @@ static const char *TAG = "link.muse";
 #define KEEP_RELOAD     BIT3    // Link may have changed the saved networks
 #define KEEP_FORGET     BIT4    // forget the networks marked in s_saved
 
+#define KEEP_RETRY      BIT5    // a talk press requests a fresh look
+
 #define CONNECT_TIMEOUT_MS 20000
 #define RETRY_MIN_US (5LL * 1000 * 1000)
 #define RETRY_MAX_US (60LL * 1000 * 1000)
@@ -223,6 +225,10 @@ static void op_wifi_status(muse_wifi_status_t *out) {
 
 static void op_wifi_apply(void) {
     keeper_kick(KEEP_WIFI);
+}
+
+static void op_wifi_retry_now(void) {
+    keeper_kick(KEEP_RETRY);
 }
 
 static void op_wifi_nap(bool nap) {
@@ -407,6 +413,7 @@ static void op_reset_setup(void) {
 static const muse_link_ops_t s_ops = {
     .wifi_status = op_wifi_status,
     .wifi_apply = op_wifi_apply,
+    .wifi_retry_now = op_wifi_retry_now,
     .wifi_get = op_wifi_get,
     .wifi_set = op_wifi_set,
     .wifi_scan = op_wifi_scan,
@@ -510,6 +517,7 @@ static void keeper_task(void *arg) {
     uint32_t pending = KEEP_BLE;
     bool napped = false;
     bool wifi_stopped = false;
+    bool retry_requested = false;
     bool setup_done = config_setup_complete();
     if (setup_done && muse_settings_ble_on()) {
         // Registered devices boot with the phone companion off; the settings
@@ -555,10 +563,16 @@ static void keeper_task(void *arg) {
             }
         }
 
+        if (pending & KEEP_RETRY) {
+            retry_requested = true;
+            next_try = 0;
+        }
+
         bool have = s_ssid[0] != '\0' || WIFI_OVERRIDE;
         napped = napped && s_nap;
         bool stop_wifi = !muse_settings_wifi_on() || !have;
         wifi_stopped = wifi_stopped && stop_wifi;
+        if (stop_wifi || s_nap || wifi_mgr_is_connected()) retry_requested = false;
         if (stop_wifi) {
             // A dropped connection may still have a reconnect timer pending.
             // Cancel it once on entry, even without an IP address. Retry if a
@@ -593,7 +607,7 @@ static void keeper_task(void *arg) {
             bool first = s_chosen;
             s_chosen = false;
             app_wifi_join_t r;
-            if (!first && none_nearby_lately()) {
+            if (!first && !retry_requested && none_nearby_lately()) {
                 r = APP_WIFI_NOT_NEARBY;   // Link's join at boot just looked
             } else {
                 s_joining = true;
@@ -605,6 +619,7 @@ static void keeper_task(void *arg) {
                 r = app_wifi_join_saved(CONNECT_TIMEOUT_MS, first);
                 s_joining = false;
             }
+            if (r != APP_WIFI_BUSY) retry_requested = false;
             int64_t now = esp_timer_get_time();
             if (r == APP_WIFI_JOINED) {
                 set_fail("");

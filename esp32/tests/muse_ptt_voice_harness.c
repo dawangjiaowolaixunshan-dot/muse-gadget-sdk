@@ -143,6 +143,7 @@ int muse_settings_volume(void) { return 20; }
 int muse_settings_mic_gain(void) { return 30; }
 bool muse_wifi_connected(void) { return ready; }
 void muse_wifi_apply(void) {}
+void muse_wifi_retry_now(void) {}
 void muse_wifi_power(muse_wifi_power_t p) { (void)p; }
 bool muse_hatch_ready(void) { return ready; }
 void muse_hatch_status(muse_hatch_status_t *s) { s->state=ready?MUSE_HATCH_REACHABLE:MUSE_HATCH_OFFLINE; }

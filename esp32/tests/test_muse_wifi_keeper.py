@@ -46,6 +46,7 @@ class MuseWifiKeeper(unittest.TestCase):
 #define KEEP_FORGET 4
 #define KEEP_RELOAD 8
 #define KEEP_WIFI 16
+#define KEEP_RETRY 32
 #define STACK_MONITOR_INIT 0
 #define BIT_CONNECTED 1
 #define BIT_GOT_IP 2
@@ -57,14 +58,15 @@ static int s_ready, s_events;
 static uint32_t s_creds_gen;
 static bool s_keep_connected, s_inited = true;
 static atomic_bool s_sta_idle;
-static bool wifi_on, connected, timer_pending, gate_busy;
+static bool wifi_on, connected, timer_pending, gate_busy, recently_away;
 static bool s_away, s_nap, s_chosen, s_joining, s_linked, s_editing;
 static char s_ssid[33];
 static TimerHandle_t s_reconnect_timer = (void *)1;
 static int disconnects, connects, joins;
 static jmp_buf tick_end;
 typedef struct {
-    bool on, saved, connected, timer, nap, busy;
+    bool on, saved, connected, timer, nap, busy, away;
+    uint32_t notify;
 } tick_t;
 static tick_t ticks[4];
 static unsigned nticks, at;
@@ -81,7 +83,7 @@ static bool muse_settings_ble_on(void) { return false; }
 static void muse_settings_set_ble_on(bool b) { (void)b; }
 static bool muse_settings_wifi_on(void) { return wifi_on; }
 static void app_ble_companion_set(bool b) { (void)b; }
-static bool none_nearby_lately(void) { return false; }
+static bool none_nearby_lately(void) { return recently_away; }
 static bool wifi_mgr_is_connected(void) { return connected; }
 static int xTimerStop(TimerHandle_t t, int w) {
     (void)t; (void)w; timer_pending = false; return 1;
@@ -113,7 +115,7 @@ static void apply_tick(void) {
     tick_t *t = &ticks[at];
     wifi_on = t->on; s_ssid[0] = t->saved ? 's' : '\0';
     connected = t->connected; timer_pending = t->timer;
-    s_nap = t->nap; gate_busy = t->busy;
+    s_nap = t->nap; gate_busy = t->busy; recently_away = t->away;
     s_keep_connected = t->timer || t->connected;
 }
 static void xTaskNotifyWait(int a, unsigned b, uint32_t *pending, int wait) {
@@ -125,7 +127,7 @@ static void xTaskNotifyWait(int a, unsigned b, uint32_t *pending, int wait) {
     }
     if (++at == nticks) longjmp(tick_end, 1);
     apply_tick();
-    *pending = KEEP_WIFI;
+    *pending = ticks[at].notify ? ticks[at].notify : KEEP_WIFI;
 }
 ''' + constants + function_source(glue, "static void keeper_task(") + r'''
 static void run(void) {
@@ -187,6 +189,26 @@ int main(int argc, char **argv) {
         nticks = 1; run();
         assert(disconnects == 0 && connects == 0 && joins == 0);
         break;
+    case 9: // Passive wake respects the recent scan; a talk press forces a fresh one.
+        ticks[0] = (tick_t){ .on = true, .saved = true, .away = true };
+        ticks[1] = ticks[0];
+        ticks[2] = (tick_t){ .on = true, .saved = true, .away = true, .notify = KEEP_RETRY };
+        nticks = 3; run();
+        assert(joins == 1 && connected);
+        break;
+    case 10: // A talk press survives a busy operation gate and tries again.
+        ticks[0] = (tick_t){ .on = true, .saved = true, .away = true };
+        ticks[1] = (tick_t){ .on = true, .saved = true, .away = true, .busy = true, .notify = KEEP_RETRY };
+        ticks[2] = ticks[0];
+        nticks = 3; run();
+        assert(joins == 1 && connected);
+        break;
+    case 11: // The explicit retry also leaves a healthy connection on its AP.
+        ticks[0] = (tick_t){ .on = true, .saved = true, .connected = true };
+        ticks[1] = (tick_t){ .on = true, .saved = true, .connected = true, .notify = KEEP_RETRY };
+        nticks = 2; run();
+        assert(disconnects == 0 && joins == 0 && connected);
+        break;
     default: return 2;
     }
     return 0;
@@ -232,6 +254,15 @@ int main(int argc, char **argv) {
 
     def test_off_does_not_interrupt_setup_while_gate_is_busy(self):
         self.run_case(8)
+
+    def test_talk_press_rescans_after_no_network_found(self):
+        self.run_case(9)
+
+    def test_talk_press_retry_survives_busy_radio(self):
+        self.run_case(10)
+
+    def test_talk_press_does_not_move_a_connected_device(self):
+        self.run_case(11)
 
 
 if __name__ == "__main__":

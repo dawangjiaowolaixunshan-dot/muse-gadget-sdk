@@ -1029,7 +1029,7 @@ static bool finish_note(void)
 static bool can_record(void)
 {
     if (!muse_wifi_connected()) {
-        muse_wifi_apply();   /* retry now, not after the backoff */
+        muse_wifi_retry_now();
     }
     bool ready = muse_hatch_ready();
 #if HOLD_NOTES
@@ -1480,6 +1480,7 @@ static void voice_task(void *arg)
 #if CONFIG_MUSE_REALTIME_VOICE
         if (ptt) {
             pending_down = false;
+            if (!muse_wifi_connected()) muse_wifi_retry_now();
             bool ready = muse_voice_call_ready();
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
             if (!ready) {
@@ -1503,7 +1504,6 @@ static void voice_task(void *arg)
             if (ready) run_call(true, wake ? s_pre_fill : 0);
             else {
                 muse_input_clear_call_pending(s_press_mark);
-                if (!muse_wifi_connected()) muse_wifi_apply();
                 go_idle(not_ready_reason());
             }
             pre_reset();

@@ -177,6 +177,15 @@ void muse_wifi_apply(void)
     }
 }
 
+void muse_wifi_retry_now(void)
+{
+    if (s_ops && s_ops->wifi_retry_now) {
+        s_ops->wifi_retry_now();
+    } else {
+        muse_wifi_apply();
+    }
+}
+
 void muse_wifi_status(muse_wifi_status_t *out)
 {
     if (s_ops && s_ops->wifi_status) {
