@@ -244,6 +244,7 @@ static bool s_avatar_tapped;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 void muse_stopwatch_red_screen(bool asleep);
 bool muse_stopwatch_red_leaving(void);
+void *muse_stopwatch_red_snapshot_buf(size_t bytes);
 #endif
 static int s_ring_value = -1;
 static uint32_t s_caption_version;
@@ -2514,18 +2515,18 @@ static void send_snapshot(void)
 {
 #if LV_USE_SNAPSHOT
 #if STOPWATCH_PORTRAIT
-    /* The snapshot only goes to USB. Allocate ordinary PSRAM, not a draw
-     * buffer from the panel's more restricted DMA allocator. */
     lv_draw_buf_t snapshot;
     uint32_t stride = lv_draw_buf_width_to_stride(s_w, LV_COLOR_FORMAT_RGB565);
     size_t size = stride * s_h;
-    void *pixels = heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *pixels = muse_stopwatch_red_snapshot_buf(size);
     lv_draw_buf_t *buf = &snapshot;
-    if (!pixels || lv_draw_buf_init(buf, s_w, s_h, LV_COLOR_FORMAT_RGB565, stride, pixels, size) != LV_RESULT_OK ||
-        lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, buf) != LV_RESULT_OK) {
-        ESP_LOGW(TAG, "StopWatch snapshot allocation/draw failed, largest PSRAM block %zu",
-                 heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        heap_caps_free(pixels);
+    if (!pixels || lv_draw_buf_init(buf, s_w, s_h, LV_COLOR_FORMAT_RGB565, stride, pixels, size) != LV_RESULT_OK) {
+        ESP_LOGW(TAG, "StopWatch snapshot unavailable");
+        return;
+    }
+    lv_draw_buf_set_flag(buf, LV_IMAGE_FLAGS_MODIFIABLE);
+    if (lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, buf) != LV_RESULT_OK) {
+        ESP_LOGW(TAG, "StopWatch snapshot draw failed");
         return;
     }
 #else
@@ -2557,10 +2558,10 @@ static void send_snapshot(void)
     }
     muse_console_write("SNAP END\n", 9);
 done:
-#if STOPWATCH_PORTRAIT
-    heap_caps_free(pixels);
-#else
+#if !STOPWATCH_PORTRAIT
     lv_draw_buf_destroy(buf);
+#else
+    (void)buf;
 #endif
 #else
     muse_console_write("\nSNAP OFF\n", 10);   /* so snap.py can say why */

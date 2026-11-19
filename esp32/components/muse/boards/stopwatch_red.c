@@ -150,6 +150,13 @@ bool muse_stopwatch_red_leaving(void)
     return s_clip == RED_BYE_SLOW || s_clip == RED_BYE_QUICK;
 }
 
+/* Snapshot and rendering run in the same LVGL task. Between fades, the
+ * previous frame buffer is spare and the next transition swaps it out. */
+void *muse_stopwatch_red_snapshot_buf(size_t bytes)
+{
+    return s_codec && s_frame >= 0 && !s_blending && bytes <= sizeof(s_decoder->frame[0]) ? s_old : NULL;
+}
+
 void muse_stopwatch_red_screen(bool asleep)
 {
     ESP_LOGI(TAG, "screen=%s frames_total=%u decode_max_us=%u",
