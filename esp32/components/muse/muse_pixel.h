@@ -40,6 +40,10 @@ typedef struct {
     float happy;     /* 0..1 pet reaction */
     float working;   /* 0 or 1 in THINKING: a call's Muse is busy on work it was asked
                       * for, nothing playing. A renderer that ignores it shows THINKING. */
+    bool woke;        /* the screen returned from sleep this frame */
+    bool touched;     /* the avatar itself was tapped */
+    bool in_call;
+    bool ending;     /* the live call is hanging up */
 } muse_pose_t;
 
 /* Accent colour of a mode (for the surrounding UI), as 0xRRGGBB. */

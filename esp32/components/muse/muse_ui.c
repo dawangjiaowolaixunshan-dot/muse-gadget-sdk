@@ -238,6 +238,10 @@ static int s_shown_lit = -1;
 static uint32_t s_shown_accent;
 static uint32_t s_shown_status_accent;   /* the label and ring: WORKING recolours within THINKING */
 static bool s_meter_visible = true;
+static bool s_avatar_tapped;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
+void muse_stopwatch_red_screen(bool asleep);
+#endif
 static int s_ring_value = -1;
 static uint32_t s_caption_version;
 static float s_next_power_update;
@@ -599,7 +603,10 @@ static void build_button_icons(lv_obj_t *face)
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
-    if (!s_volume_swipe.claimed) muse_state_make_happy();
+    if (!s_volume_swipe.claimed) {
+        s_avatar_tapped = true;
+        muse_state_make_happy();
+    }
 }
 
 static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compact)
@@ -1905,8 +1912,14 @@ static bool update_sleep(void)
         lv_obj_set_style_bg_opa(s_cover, LV_OPA_COVER, 0);
         lv_obj_remove_flag(s_cover, LV_OBJ_FLAG_HIDDEN);
         s_dark = true;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
+        muse_stopwatch_red_screen(true);
+#endif
     } else if (!asleep && s_dark) {
         s_dark = false;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
+        muse_stopwatch_red_screen(false);
+#endif
         if (muse_board->panel_sleep) {
             muse_board->panel_sleep(false);
         }
@@ -2452,7 +2465,9 @@ static void frame_tick(lv_timer_t *timer)
 #endif
         s_last_mode = mode;
     }
+    bool waking = s_dark;
     if (update_sleep()) {
+        s_avatar_tapped = false;
         return;
     }
 #if CONFIG_MUSE_VIDEO
@@ -2491,8 +2506,9 @@ static void frame_tick(lv_timer_t *timer)
     /* Fast attack, slow release keeps the mouth and meter lively but readable. */
     float level = muse_state_level();
     /* The voice task can switch sources after this frame read its mode. */
-    if (muse_voice_in_call() &&
-        ((mode == MUSE_MODE_LISTENING) != (muse_voice_call_view() == MUSE_VOICE_VIEW_LISTENING))) level = 0;
+    muse_voice_view_t call = muse_voice_call_view();
+    if (call != MUSE_VOICE_VIEW_NONE &&
+        ((mode == MUSE_MODE_LISTENING) != (call == MUSE_VOICE_VIEW_LISTENING))) level = 0;
     s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
 
     muse_pose_t pose = {
@@ -2501,8 +2517,13 @@ static void frame_tick(lv_timer_t *timer)
         .mode_t = mode_t,
         .level = s_level,
         .happy = muse_state_happiness(),
-        .working = muse_voice_call_view() == MUSE_VOICE_VIEW_WORKING ? 1.0f : 0,
+        .working = call == MUSE_VOICE_VIEW_WORKING ? 1.0f : 0,
+        .woke = waking,
+        .touched = s_avatar_tapped,
+        .in_call = call != MUSE_VOICE_VIEW_NONE,
+        .ending = call == MUSE_VOICE_VIEW_ENDING,
     };
+    s_avatar_tapped = false;
     if (!muse_board->epaper || mode != s_last_epaper_pose) {
         muse_pixel_render(&pose);
         invalidate_muse();
