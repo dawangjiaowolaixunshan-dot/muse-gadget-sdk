@@ -244,7 +244,6 @@ static bool s_avatar_tapped;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 void muse_stopwatch_red_screen(bool asleep);
 bool muse_stopwatch_red_leaving(void);
-void *muse_stopwatch_red_snapshot_buf(size_t bytes);
 #endif
 static int s_ring_value = -1;
 static uint32_t s_caption_version;
@@ -1452,16 +1451,20 @@ static void update_portrait(muse_mode_t mode, float now)
 {
     static char caption[MUSE_CAPTION_MAX];
     static float problem_until;
+    static const char *notice;
     static int last_lit = -1;
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
     if (fresh) {
         bool failed = !strcmp(caption, "CALL FAILED") || !strcmp(caption, "LOST CONNECTION TO MUSE") ||
                       !strcmp(caption, "MUSE DIDN'T ANSWER") || !strcmp(caption, "MUSE DIDN'T TAKE THE CALL");
-        problem_until = failed ? now + 4.0f : 0;
+        bool unreachable = !strcmp(caption, "CAN'T REACH MUSE");
+        bool reconnecting = !strcmp(caption, "RECONNECTING - KEEP HOLDING");
+        notice = reconnecting ? "按住黄键" : unreachable ? "连接遇到问题" : "通话已断开";
+        problem_until = now + (reconnecting ? 8.0f : (failed || unreachable) ? 4.0f : 0);
     }
     muse_voice_view_t call = muse_voice_call_view();
     const char *text = portrait_state(mode, call);
-    if (mode == MUSE_MODE_IDLE && call == MUSE_VOICE_VIEW_NONE && now < problem_until) text = "通话已断开";
+    if (mode == MUSE_MODE_IDLE && call == MUSE_VOICE_VIEW_NONE && now < problem_until) text = notice;
     bool ready = call == MUSE_VOICE_VIEW_NONE || call == MUSE_VOICE_VIEW_READY;
     bool hint = ready && mode == MUSE_MODE_IDLE && muse_state_hint_pending();
     if (hint && !strcmp(caption, "SPEAKER OFF")) {
@@ -2514,27 +2517,10 @@ void muse_ui_bench_page(bool settings)
 static void send_snapshot(void)
 {
 #if LV_USE_SNAPSHOT
-#if STOPWATCH_PORTRAIT
-    lv_draw_buf_t snapshot;
-    uint32_t stride = lv_draw_buf_width_to_stride(s_w, LV_COLOR_FORMAT_RGB565);
-    size_t size = stride * s_h;
-    void *pixels = muse_stopwatch_red_snapshot_buf(size);
-    lv_draw_buf_t *buf = &snapshot;
-    if (!pixels || lv_draw_buf_init(buf, s_w, s_h, LV_COLOR_FORMAT_RGB565, stride, pixels, size) != LV_RESULT_OK) {
-        ESP_LOGW(TAG, "StopWatch snapshot unavailable");
-        return;
-    }
-    lv_draw_buf_set_flag(buf, LV_IMAGE_FLAGS_MODIFIABLE);
-    if (lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, buf) != LV_RESULT_OK) {
-        ESP_LOGW(TAG, "StopWatch snapshot draw failed");
-        return;
-    }
-#else
     lv_draw_buf_t *buf = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
     if (!buf) {
         return;
     }
-#endif
     enum { RAW = 144 };   /* lines must fit the driver's 256-byte TX ring */
     char hdr[48];
     int n = snprintf(hdr, sizeof(hdr), "\nSNAP BEGIN %d %d %d\n", (int)buf->header.w, (int)buf->header.h, RAW);
@@ -2558,11 +2544,7 @@ static void send_snapshot(void)
     }
     muse_console_write("SNAP END\n", 9);
 done:
-#if !STOPWATCH_PORTRAIT
     lv_draw_buf_destroy(buf);
-#else
-    (void)buf;
-#endif
 #else
     muse_console_write("\nSNAP OFF\n", 10);   /* so snap.py can say why */
 #endif

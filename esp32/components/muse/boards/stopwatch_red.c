@@ -17,7 +17,7 @@
 #define IDLE_GAP_S 16.0f
 
 typedef struct {
-    uint16_t frame[2][(PANEL * PANEL + 7) & ~7];
+    uint16_t frame[2][RED_SIZE * RED_SIZE];
     uint8_t packet[RED_PACKET_MAX + 4];
 } decoder_t;
 
@@ -95,19 +95,10 @@ static bool decode(int target)
     }
     muse_yuv_1x(pic.y, pic.u, pic.v, pic.y_stride, pic.c_stride, RED_SIZE,
                 RED_SIZE, (uint8_t *)s_shown, RED_SIZE * 2);
-    /* Expand in place from the last pixel to the first. LVGL receives native
-     * RGB565 and repeated source rows only need a copy. */
-    int previous = -1;
-    for (int y = PANEL - 1; y >= 0; --y) {
-        uint16_t *out = s_shown + y * PANEL;
-        int sy = s_expand_map[y];
-        if (sy == previous) {
-            memcpy(out, out + PANEL, PANEL * sizeof(*out));
-        } else {
-            const uint16_t *in = s_shown + sy * RED_SIZE;
-            for (int x = PANEL - 1; x >= 0; --x) out[x] = __builtin_bswap16(in[s_expand_map[x]]);
-        }
-        previous = sy;
+    /* Keep both frames at source size. The full-size portrait is only ever
+     * assembled into LVGL's output strips, leaving PSRAM for the voice session. */
+    for (size_t i = 0; i < RED_SIZE * RED_SIZE; ++i) {
+        s_shown[i] = __builtin_bswap16(s_shown[i]);
     }
     unsigned elapsed = (unsigned)(esp_timer_get_time() - start);
     if (elapsed > s_decode_max_us) s_decode_max_us = elapsed;
@@ -148,13 +139,6 @@ static void select_clip(unsigned clip, float now)
 bool muse_stopwatch_red_leaving(void)
 {
     return s_clip == RED_BYE_SLOW || s_clip == RED_BYE_QUICK;
-}
-
-/* Snapshot and rendering run in the same LVGL task. Between fades, the
- * previous frame buffer is spare and the next transition swaps it out. */
-void *muse_stopwatch_red_snapshot_buf(size_t bytes)
-{
-    return s_codec && s_frame >= 0 && !s_blending && bytes <= sizeof(s_decoder->frame[0]) ? s_old : NULL;
 }
 
 void muse_stopwatch_red_screen(bool asleep)
@@ -267,29 +251,44 @@ static uint16_t blend565(uint16_t before, uint16_t after, unsigned k)
 void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1)
 {
     size_t bytes = (x1 - x0 + 1) * sizeof(*dst);
+    int previous_sy = -1;
+    bool previous_mouth = false;
+    const int height = (int)s_lips + 1;
+    const int width = 7 + (int)s_lips * 3;
     for (int y = y0; y <= y1; ++y, dst += stride_px) {
         if (s_failed || s_frame < 0) {
             memset(dst, 0, bytes);
             continue;
         }
-        const uint16_t *row = s_shown + y * PANEL;
-        memcpy(dst, row + x0, bytes);
-        if (s_blending) {
-            const uint16_t *old = s_old + y * PANEL;
-            for (int x = x0; x <= x1; ++x) dst[x-x0] = blend565(old[x], row[x], s_blend_weight);
-        }
+        int sy = s_expand_map[y];
         int dy = y - s_lip_y;
-        int height = (int)s_lips + 1, width = 7 + (int)s_lips * 3;
-        if (!s_lips || dy < -height-2 || dy > height+2) continue;
+        bool mouth = s_lips && dy >= -height-2 && dy <= height+2;
+        if (sy == previous_sy && !mouth && !previous_mouth) {
+            memcpy(dst, dst - stride_px, bytes);
+        } else {
+            const uint16_t *row = s_shown + sy * RED_SIZE;
+            const uint16_t *old = s_old + sy * RED_SIZE;
+            if (s_blending) {
+                for (int x = x0; x <= x1; ++x) {
+                    int sx = s_expand_map[x];
+                    dst[x-x0] = blend565(old[sx], row[sx], s_blend_weight);
+                }
+            } else {
+                for (int x = x0; x <= x1; ++x) dst[x-x0] = row[s_expand_map[x]];
+            }
+        }
+        previous_sy = sy;
+        previous_mouth = mouth;
+        if (!mouth) continue;
         int start = x0 > s_lip_x-width ? x0 : s_lip_x-width;
         int stop = min_int(x1, s_lip_x+width);
+        const uint16_t *lip_row = s_shown + s_expand_map[y + (dy < 0 ? 1 : -1)] * RED_SIZE;
         for (int x = start; x <= stop; ++x) {
             int dx = x - s_lip_x;
             int opening = height * (width*width - dx*dx) / (width*width);
             int distance = dy < 0 ? -dy : dy;
             if (distance > opening+1) continue;
-            uint16_t color = distance < opening ? 0x3823 :
-                s_shown[(y + (dy < 0 ? 1 : -1)) * PANEL + x];
+            uint16_t color = distance < opening ? 0x3823 : lip_row[s_expand_map[x]];
             dst[x-x0] = blend565(dst[x-x0], color, distance < opening ? 14 : 8);
         }
     }
