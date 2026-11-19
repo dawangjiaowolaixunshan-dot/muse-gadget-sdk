@@ -572,7 +572,11 @@ static void keeper_task(void *arg) {
         napped = napped && s_nap;
         bool stop_wifi = !muse_settings_wifi_on() || !have;
         wifi_stopped = wifi_stopped && stop_wifi;
-        if (stop_wifi || s_nap || wifi_mgr_is_connected()) retry_requested = false;
+        // The talk press can wake the screen before input finishes ending
+        // the Wi-Fi nap. Keep that request until the radio is ready.
+        if (stop_wifi || (s_nap && muse_state_asleep()) || wifi_mgr_is_connected()) {
+            retry_requested = false;
+        }
         if (stop_wifi) {
             // A dropped connection may still have a reconnect timer pending.
             // Cancel it once on entry, even without an IP address. Retry if a

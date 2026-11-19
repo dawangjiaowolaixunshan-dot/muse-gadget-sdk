@@ -209,6 +209,13 @@ int main(int argc, char **argv) {
         nticks = 2; run();
         assert(disconnects == 0 && joins == 0 && connected);
         break;
+    case 12: // The screen can wake before its Wi-Fi nap is released.
+        ticks[0] = (tick_t){ .on = true, .saved = true, .away = true };
+        ticks[1] = (tick_t){ .on = true, .saved = true, .away = true, .nap = true, .notify = KEEP_RETRY };
+        ticks[2] = ticks[0];
+        nticks = 3; run();
+        assert(joins == 1 && connected);
+        break;
     default: return 2;
     }
     return 0;
@@ -263,6 +270,9 @@ int main(int argc, char **argv) {
 
     def test_talk_press_does_not_move_a_connected_device(self):
         self.run_case(11)
+
+    def test_talk_press_survives_until_wifi_wakes(self):
+        self.run_case(12)
 
 
 if __name__ == "__main__":
