@@ -677,14 +677,17 @@ bool muse_vc_parse_event(const char *line, size_t len, muse_vc_event_t *ev)
     } else if (span_is(type, "response.output_audio_transcript.delta")) {
         if (get_string(line, len, "delta", &ev->text)) {
             ev->kind = MUSE_VC_EV_REPLY_TEXT;
+            get_id(line, len, "response_id", &ev->response_id);
         }
     } else if (span_is(type, "response.output_audio_transcript.done")) {
         if (get_string(line, len, "transcript", &ev->text)) {
             ev->kind = MUSE_VC_EV_REPLY_DONE;
+            get_id(line, len, "response_id", &ev->response_id);
         }
     } else if (span_is(type, "conversation.item.input_audio_transcription.completed")) {
         if (get_string(line, len, "transcript", &ev->text)) {
             ev->kind = MUSE_VC_EV_USER_TEXT;
+            get_id(line, len, "item_id", &ev->item_id);
         }
     } else if (span_is(type, "conversation.item.added")) {
         muse_vc_span_t item_type, name;
@@ -1325,6 +1328,25 @@ void muse_vc_reply_gate_event(muse_vc_reply_gate_t *g, const muse_vc_event_t *ev
     default:
         break;
     }
+}
+
+bool muse_vc_reply_gate_caption_event(const muse_vc_reply_gate_t *g, const muse_vc_event_t *ev)
+{
+    char id[MUSE_VC_TURN_ID_MAX];
+    if (ev->kind == MUSE_VC_EV_USER_TEXT) {
+        return g->hold_last[0] && (!ev->item_id.p ||
+               (take_id(ev->item_id, id, sizeof(id)) && !strcmp(id, g->hold_last)));
+    }
+    if ((ev->kind != MUSE_VC_EV_REPLY_TEXT && ev->kind != MUSE_VC_EV_REPLY_DONE) ||
+        !muse_vc_reply_gate_captions(g)) return false;
+    if (!ev->response_id.p) return g->response[0];
+    if (!take_id(ev->response_id, id, sizeof(id))) return false;
+    if (!strcmp(id, g->response)) return true;
+    for (int i = 0; i < g->n_ids; i++) {
+        const muse_vc_gate_id_t *entry = &g->ids[i];
+        if (!strcmp(id, entry->id)) return entry->state == GATE_PLAYING || entry->state == GATE_TAIL;
+    }
+    return false;
 }
 
 bool muse_vc_reply_gate_done(const muse_vc_reply_gate_t *g, const muse_vc_event_t *ev)

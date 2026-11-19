@@ -356,6 +356,8 @@ bool muse_vc_reply_gate_playing(const muse_vc_reply_gate_t *g);
 void muse_vc_reply_gate_overflow(muse_vc_reply_gate_t *g);
 /* Muse answers the last hold: its item is confirmed and not blocked. */
 bool muse_vc_reply_gate_captions(const muse_vc_reply_gate_t *g);
+/* A watch caption must belong to the current hold/reply. */
+bool muse_vc_reply_gate_caption_event(const muse_vc_reply_gate_t *g, const muse_vc_event_t *ev);
 /* MUSE_VC_GATE_FLUSH_* bits raised since the last call, cleared. */
 uint8_t muse_vc_reply_gate_take_flush(muse_vc_reply_gate_t *g);
 /* The current reply's response.created id while it's open (no response.done

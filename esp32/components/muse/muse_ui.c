@@ -1607,11 +1607,13 @@ static void update_portrait(muse_mode_t mode, float now)
     static int last_lit = -1;
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
     if (fresh) {
-        bool failed = !strcmp(caption, "CALL FAILED") || !strcmp(caption, "LOST CONNECTION TO MUSE") ||
-                      !strcmp(caption, "MUSE DIDN'T ANSWER") || !strcmp(caption, "MUSE DIDN'T TAKE THE CALL");
-        bool unreachable = !strcmp(caption, "CAN'T REACH MUSE");
-        bool reconnecting = !strcmp(caption, "RECONNECTING - KEEP HOLDING");
-        notice = reconnecting ? "按住黄键" : unreachable ? "连接遇到问题" : "通话已断开";
+        bool no_reply = !strcmp(caption, "MUSE DIDN'T ANSWER");
+        bool unreachable = !strcmp(caption, muse_lang_message("CAN'T REACH MUSE"));
+        bool failed = !strcmp(caption, muse_lang_message("CALL FAILED")) ||
+                      !strcmp(caption, muse_lang_message("LOST CONNECTION TO MUSE")) ||
+                      !strcmp(caption, muse_lang_message("MUSE DIDN'T TAKE THE CALL")) || no_reply;
+        bool reconnecting = !strcmp(caption, muse_lang_message("RECONNECTING - KEEP HOLDING"));
+        notice = reconnecting || no_reply ? "按住黄键" : unreachable ? "连接遇到问题" : "通话已断开";
         problem_until = now + (reconnecting ? 8.0f : (failed || unreachable) ? 4.0f : 0);
     }
     muse_voice_view_t call = muse_voice_call_view();

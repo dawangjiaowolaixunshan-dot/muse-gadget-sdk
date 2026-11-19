@@ -233,6 +233,9 @@ static int64_t s_wall_offset_ms;
 static bool s_wall_known;
 static uint32_t s_bad_lines, s_bad_audio, s_dropped_audio, s_frames_out;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+static constexpr int64_t WATCH_REPLY_TIMEOUT_US = 22000000;
+static int64_t s_watch_reply_deadline;
+static bool s_watch_waiting_after_release;
 // Counts only. Keep the mic samples and transcript out of the console log.
 static struct {
     unsigned mic_samples, mic_peak, sent, turns, replies, incoming_audio, rejected_audio;
@@ -681,6 +684,11 @@ static void reply_lost(void)
     muse_vc_reply_gate_press(s_gate);
     defer_clear();
     s_st |= ST_REPLY_LOST;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    muse_watch_dialogue_stop(s_press);
+    s_watch_reply_deadline = 0;
+    s_watch_waiting_after_release = false;
+#endif
 }
 
 /* The gate dropped something: queued playback (s_out via the reader, and
@@ -727,6 +735,10 @@ static void ptt_pressed(uint32_t press)
     s_stop_drain_until = 0;
     defer_clear();
     s_reply[0] = '\0';   /* the old reply's caption is done too */
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    s_watch_reply_deadline = 0;
+    s_watch_waiting_after_release = false;
+#endif
     muse_vc_resampler_init(&s_down, MUSE_VC_WIRE_RATE, MUSE_VC_MIC_RATE);   /* no edge carried from the old reply */
     s_st &= ~(ST_REPLY_AUDIO | ST_REPLY_DONE | ST_REPLY_LOST | ST_HEARD);
     s_talk = true;
@@ -856,6 +868,9 @@ static void play(const muse_vc_event_t &ev, int64_t now)
         muse_watch_dialogue_received(s_press, (size_t)n);
 #endif
         defer_flush();
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        if (audible && s_watch_reply_deadline) s_watch_reply_deadline = now + WATCH_REPLY_TIMEOUT_US;
+#endif
         if (ptt_playable() && !s_defer.len && xStreamBufferSpacesAvailable(s_out) >= bytes) {
             out_write(s_pcm, (size_t)n);
             s_frames_out++;
@@ -898,8 +913,7 @@ static void on_line(void *ctx, const char *line, size_t len)
     /* In a push-to-talk call, reply captions only while Muse answers the last hold. */
     bool captions = !s_ptt || muse_vc_reply_gate_captions(s_gate);
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
-    if (s_ptt && before && (ev.kind == MUSE_VC_EV_USER_TEXT ||
-            (captions && (ev.kind == MUSE_VC_EV_REPLY_TEXT || ev.kind == MUSE_VC_EV_REPLY_DONE)))) {
+    if (s_ptt && before && muse_vc_reply_gate_caption_event(s_gate, &ev)) {
         char transcript[640];
         if (muse_vc_json_unescape(ev.text, transcript, sizeof(transcript))) {
             if (ev.kind == MUSE_VC_EV_USER_TEXT) muse_watch_dialogue_heard(s_press, transcript, now);
@@ -977,6 +991,10 @@ static void on_line(void *ctx, const char *line, size_t len)
         }
         if (muse_vc_reply_gate_done(s_gate, &ev)) {
             s_st |= ST_REPLY_DONE;   /* this reply's own turn or response, never an older one's */
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            s_watch_reply_deadline = 0;
+            s_watch_waiting_after_release = false;
+#endif
         }
     } else if (s_ptt && s_call.state != MUSE_VC_LIVE) {
         if (ptt_playable()) {
@@ -1154,6 +1172,7 @@ static bool begin_call(uint32_t gen)
     s_bad_lines = s_bad_audio = s_dropped_audio = s_frames_out = 0;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
     s_live_trace = {};
+    s_watch_reply_deadline = 0;
 #endif
     char path[96];
     snprintf(path, sizeof(path), "/voice/realtime?call_id=%s", id);
@@ -1249,6 +1268,9 @@ static void take_commands(int64_t now)
         if (!(w & 1) && s_talk) {
             s_talk = false;
             s_tail_left = PTT_TAIL_MS * (MUSE_VC_MIC_RATE / 1000);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            s_watch_waiting_after_release = true;
+#endif
         }
     }
 }
@@ -1260,6 +1282,21 @@ bool muse_voice_call_poll(void)
     }
     int64_t now = now_us();
     take_commands(now);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    if (s_ptt && s_call.state == MUSE_VC_LIVE && s_watch_waiting_after_release && !s_talk) {
+        s_watch_waiting_after_release = false;
+        s_watch_reply_deadline = now + WATCH_REPLY_TIMEOUT_US;
+        ESP_LOGI(TAG, "watch live: release mic_samples=%u mic_peak=%u sent=%u",
+                 s_live_trace.mic_samples, s_live_trace.mic_peak, s_live_trace.sent);
+    }
+    if (s_ptt && s_call.state == MUSE_VC_LIVE && s_watch_reply_deadline && now >= s_watch_reply_deadline) {
+        s_watch_reply_deadline = 0;
+        muse_watch_dialogue_stop(s_press);
+        ESP_LOGW(TAG, "watch live: reply timed out, turns=%u replies=%u incoming=%u gate_drop=%u",
+                 s_live_trace.turns, s_live_trace.replies, s_live_trace.incoming_audio, s_live_trace.rejected_audio);
+        take(muse_vc_call_hang_up(&s_call, MUSE_VC_END_NO_ANSWER, now));
+    }
+#endif
     take(muse_vc_call_poll(&s_call, now));
     uint32_t acts = s_acts;
     s_acts = 0;
