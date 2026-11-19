@@ -13,11 +13,11 @@
 #include "stopwatch_red_data.h"
 
 #define PANEL RED_PANEL
-#define BLEND_S 0.16f
 #define IDLE_GAP_S 16.0f
+#define RETURN_FPS (RED_FPS * 1.5f)
 
 typedef struct {
-    uint16_t frame[2][RED_SIZE * RED_SIZE];
+    uint16_t frame[RED_SIZE * RED_SIZE];
     uint8_t packet[RED_PACKET_MAX + 4];
 } decoder_t;
 
@@ -41,14 +41,17 @@ static const uint32_t ACCENT[MUSE_MODE_COUNT] = {
 
 static decoder_t *s_decoder;
 static muse_vdec_t *s_codec;
-static uint16_t *s_shown, *s_old;
-static bool s_init, s_failed, s_blending, s_dirty, s_prev_call, s_prev_ending;
-static uint8_t s_clip = RED_REST, s_choices[RED_COUNT], s_blend_weight = 16;
+static uint16_t *s_shown;
+static bool s_init, s_failed, s_dirty, s_prev_call, s_prev_ending;
+static uint8_t s_clip = RED_REST, s_choices[RED_COUNT];
 static unsigned s_lips;
 static int s_lip_x, s_lip_y;
 static muse_mode_t s_prev_mode = MUSE_MODE_COUNT;
 static int s_frame = -1;
 static float s_started, s_next_idle;
+static bool s_returning, s_return_forward;
+static int s_return_from;
+static float s_return_at;
 
 static unsigned s_total_frames, s_clip_frames, s_dropped, s_decode_max_us;
 
@@ -73,17 +76,18 @@ void muse_pixel_set_size(int px)
     s_dirty = true;
 }
 
-static bool decode(int target)
+static bool decode(int target, bool returning)
 {
-    /* Catch up from the last independently decodable picture. Bound the work
-     * of one UI tick so a late display frame cannot monopolise the controls. */
-    int first = target / RED_GROUP * RED_GROUP;
-    if (first <= s_frame) first = s_frame + 1;
-    int last = min_int(target, first + 1);
+    const red_clip_t *clip = &red_clips[s_clip];
+    /* A rewind starts at an IDR. Answer clips use short groups so the
+     * requested pose can be published in the same render tick. */
+    int first = target / clip->group * clip->group;
+    if (target > s_frame && first <= s_frame) first = s_frame + 1;
+    int last = returning ? target : min_int(target, first + 1);
     int64_t start = esp_timer_get_time();
     muse_pic_t pic;
     for (int i = first; i <= last; ++i) {
-        unsigned n = red_clips[s_clip].frame + i;
+        unsigned n = clip->frame + i;
         size_t len = red_offsets[n+1] - red_offsets[n];
         if (len > RED_PACKET_MAX) return false;
         /* tinyh264 removes emulation bytes in place. The embedded stream is read-only. */
@@ -93,17 +97,16 @@ static bool decode(int target)
     }
     muse_yuv_1x(pic.y, pic.u, pic.v, pic.y_stride, pic.c_stride, RED_SIZE,
                 RED_SIZE, (uint8_t *)s_shown, RED_SIZE * 2);
-    /* Keep both frames at source size. The full-size portrait is only ever
-     * assembled into LVGL's output strips, leaving PSRAM for the voice session. */
+    /* The full-size portrait is assembled only in LVGL's output strips. */
     for (size_t i = 0; i < RED_SIZE * RED_SIZE; ++i) {
         s_shown[i] = __builtin_bswap16(s_shown[i]);
     }
     unsigned elapsed = (unsigned)(esp_timer_get_time() - start);
     if (elapsed > s_decode_max_us) s_decode_max_us = elapsed;
-    uint32_t mouth = red_mouth[red_clips[s_clip].frame + last];
+    uint32_t mouth = red_mouth[clip->frame + last];
     s_lip_x = (uint16_t)mouth;
     s_lip_y = mouth >> 16;
-    if (s_frame >= 0) s_dropped += last - s_frame - 1;
+    if (!returning && s_frame >= 0) s_dropped += last - s_frame - 1;
     s_frame = last;
     return true;
 }
@@ -115,23 +118,26 @@ static unsigned alternate(unsigned first)
 
 static void select_clip(unsigned clip, float now)
 {
-    bool had_frame = s_frame >= 0;
-    if (had_frame) {
-        uint16_t *previous = s_old;
-        s_old = s_shown;
-        s_shown = previous;
+    if (s_frame >= 0) {
         ESP_LOGI(TAG, "%s -> %s, frames=%u skip=%u decode_max_us=%u",
                  CLIP_NAME[s_clip], CLIP_NAME[clip], s_clip_frames, s_dropped, s_decode_max_us);
     } else {
         ESP_LOGI(TAG, "start %s", CLIP_NAME[clip]);
     }
-    s_blending = had_frame;
-    s_blend_weight = had_frame ? 0 : 16;
     s_clip = clip;
     s_started = now;
     s_frame = -1;
     s_clip_frames = s_dropped = 0;
     s_next_idle = now + IDLE_GAP_S;
+}
+
+static int return_frame(float now)
+{
+    int steps = (int)((now - s_return_at) * RETURN_FPS);
+    if (s_return_forward) {
+        return min_int(s_return_from + steps, red_clips[s_clip].count - 1);
+    }
+    return steps < s_return_from ? s_return_from - steps : 0;
 }
 
 bool muse_stopwatch_red_leaving(void)
@@ -151,8 +157,7 @@ void muse_pixel_render(const muse_pose_t *p)
         s_init = true;
         s_decoder = heap_caps_aligned_calloc(16, 1, sizeof(*s_decoder), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (s_decoder) {
-            s_shown = s_decoder->frame[0];
-            s_old = s_decoder->frame[1];
+            s_shown = s_decoder->frame;
             s_codec = muse_vdec_open(MUSE_VIDEO_CODEC_H264, RED_SIZE, RED_SIZE);
         }
         if (!s_codec) {
@@ -165,13 +170,23 @@ void muse_pixel_render(const muse_pose_t *p)
 
     bool entered = p->mode != s_prev_mode || p->woke || p->in_call != s_prev_call;
     bool talk_cut = s_prev_mode == MUSE_MODE_SPEAKING && p->mode == MUSE_MODE_LISTENING && p->in_call;
+    const red_clip_t *playing = &red_clips[s_clip];
+    if (!p->in_call || p->ending || p->mode != MUSE_MODE_LISTENING) s_returning = false;
+    if (talk_cut && !p->ending && playing->falling && s_frame >= 0) {
+        /* Start at the picture the panel actually showed, even if playback
+         * skipped frames. Follow the nearer end of the same arm motion. */
+        s_returning = true;
+        s_return_from = s_frame;
+        s_return_at = p->t;
+        s_return_forward = s_frame * 2 >= playing->raised + playing->falling;
+    }
     float age = p->t - s_started;
-    bool complete = age * RED_FPS >= red_clips[s_clip].count;
+    bool complete = age * RED_FPS >= playing->count;
     unsigned clip = s_clip;
 
     if (p->ending) {
         if (!s_prev_ending) clip = alternate(RED_BYE_SLOW);
-    } else if (entered && p->mode == MUSE_MODE_LISTENING) {
+    } else if (entered && p->mode == MUSE_MODE_LISTENING && !s_returning) {
         clip = talk_cut ? RED_LISTEN_INTERRUPT : RED_LISTEN_EAR;
     } else if (entered && p->mode == MUSE_MODE_THINKING) {
         clip = alternate(RED_THINK_CHIN);
@@ -205,12 +220,12 @@ void muse_pixel_render(const muse_pose_t *p)
     s_prev_call = p->in_call;
     s_prev_ending = p->ending;
 
-    int frame = min_int((int)(age * RED_FPS), red_clips[s_clip].count - 1);
+    int frame = s_returning ? return_frame(p->t) : min_int((int)(age * RED_FPS), red_clips[s_clip].count - 1);
     if (p->mode == MUSE_MODE_OFF && s_clip == RED_BYE_QUICK) {
         frame = min_int((int)(age * 3.1f * RED_FPS), red_clips[s_clip].count - 1);
     }
     if (frame != s_frame) {
-        if (!decode(frame)) {
+        if (!decode(frame, s_returning)) {
             ESP_LOGE(TAG, "could not decode %s frame %d", CLIP_NAME[s_clip], frame);
             s_failed = true;
             s_dirty = true;
@@ -221,12 +236,9 @@ void muse_pixel_render(const muse_pose_t *p)
         s_dirty = true;
     }
 
-    uint8_t blend = s_blending ? min_int((int)(16 * age / BLEND_S), 16) : 16;
     uint8_t lips = p->mode != MUSE_MODE_SPEAKING || !s_lip_x ? 0 :
         p->level >= 0.40f ? 3 : p->level >= 0.18f ? 2 : p->level >= 0.055f ? 1 : 0;
-    s_dirty |= blend != s_blend_weight || lips != s_lips;
-    s_blend_weight = blend;
-    s_blending = blend < 16;
+    s_dirty |= lips != s_lips;
     s_lips = lips;
 }
 
@@ -265,15 +277,7 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
             memcpy(dst, dst - stride_px, bytes);
         } else {
             const uint16_t *row = s_shown + sy * RED_SIZE;
-            const uint16_t *old = s_old + sy * RED_SIZE;
-            if (s_blending) {
-                for (int x = x0; x <= x1; ++x) {
-                    int sx = red_xmap[x];
-                    dst[x-x0] = blend565(old[sx], row[sx], s_blend_weight);
-                }
-            } else {
-                for (int x = x0; x <= x1; ++x) dst[x-x0] = row[red_xmap[x]];
-            }
+            for (int x = x0; x <= x1; ++x) dst[x-x0] = row[red_xmap[x]];
         }
         previous_sy = sy;
         previous_mouth = mouth;
