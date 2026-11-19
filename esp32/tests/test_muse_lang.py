@@ -44,7 +44,7 @@ def tables() -> dict[str, list[tuple[str, str]]]:
 
 class LangTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tables = tables()
+        self.tables = {name: data for name, data in tables().items() if not name.startswith("ZH_")}
 
     def test_tables_have_entries(self) -> None:
         self.assertEqual(sorted(self.tables), ["MENU", "MESSAGES", "STATUS"])
@@ -101,6 +101,22 @@ class LangTest(unittest.TestCase):
             for en, text in self.tables["MENU"]:
                 missing = sorted({c for c in text if ord(c) > 0x7E and ord(c) not in has})
                 self.assertEqual(missing, [], f"{px} px: {text!r}")
+
+    def test_simplified_chinese_uses_existing_cjk_glyphs(self) -> None:
+        language = {name: entries for name, entries in tables().items() if name.startswith("ZH_")}
+        self.assertEqual(sorted(language), ["ZH_MENU", "ZH_MESSAGES", "ZH_STATUS"])
+        glyphs = {int(cp, 16) for cp in re.findall(r"/\* U\+([0-9A-F]+) ",
+                  (MUSE / "fonts/muse_font_cjk_noto_16.c").read_text(encoding="utf-8"))}
+        settings = (MUSE / "muse_settings_ui.c").read_text(encoding="utf-8")
+        string = r'"((?:[^"\\]|\\.)*)"'
+        inline = re.findall(r'\bZH\(\s*' + string + r'\s*,\s*' + string + r'\s*\)', settings)
+        self.assertGreater(len(inline), 90)
+        for name, entries in [*language.items(), ("settings", inline)]:
+            for en, text in entries:
+                self.assertEqual(CONVERSION.findall(en), CONVERSION.findall(text), f"{name}: {en!r}")
+                self.assertFalse({c for c in text if ord(c) > 127 and ord(c) not in glyphs}, text)
+        chinese = {c for c in settings if 0x2e80 <= ord(c) <= 0xffef}
+        self.assertFalse({c for c in chinese if ord(c) not in glyphs})
 
 
 if __name__ == "__main__":

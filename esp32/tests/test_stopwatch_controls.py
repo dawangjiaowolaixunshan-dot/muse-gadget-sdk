@@ -312,6 +312,16 @@ typedef void lv_obj_t;
 #define LV_SYMBOL_POWER "P"
 #define COLOR_DANGER 1
 #define COLOR_TEXT 2
+#if TEST_ZH
+#define ZH(en, zh) zh
+static const char *settings_state(const char *name) {
+    return strcmp(name, "red bottom-left") == 0 ? "左下红" : name;
+}
+#define SETTINGS_STATE(text) settings_state(text)
+#else
+#define ZH(en, zh) en
+#define SETTINGS_STATE(text) (text)
+#endif
 static lv_obj_t *s_power;
 static char shown[128];
 static struct { const char *power_button, *talk_button, *aux_button; } board = {"red bottom-left", "top-right", NULL}, *muse_board = &board;
@@ -323,17 +333,26 @@ static void button(void *list, const char *text, int color, void (*cb)(void *), 
 ''' + function(source, 'build_power_page') + r'''
 int main(void) {
     build_power_page(NULL);
+#if TEST_ZH
+    assert(strcmp(shown, "按左下红键开机。要息屏，按左下红键。") == 0);
+#else
     assert(strcmp(shown, "Press the red bottom-left button to turn it back on. To just turn the screen off, press the red bottom-left button.") == 0);
     board.power_button = NULL; board.talk_button = "talk"; board.aux_button = "aux";
     build_power_page(NULL);
     assert(strcmp(shown, "Press the talk button to turn it back on. To just turn the screen off, press the aux button.") == 0);
+#endif
     return 0;
 }
 '''
-        path = Path(self.tmp.name) / 'settings.c'
-        path.write_text(code)
-        subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-std=c11', '-Wall', '-Wextra', '-Werror', str(path), '-o', str(path.with_suffix(''))], check=True, capture_output=True, text=True)
-        self.run_case('settings', 0)
+        for chinese in (0, 1):
+            name = f'settings-{chinese}'
+            path = Path(self.tmp.name) / (name + '.c')
+            path.write_text(code)
+            subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+                '-std=c11', '-Wall', '-Wextra', '-Werror', f'-DTEST_ZH={chinese}',
+                str(path), '-o', str(path.with_suffix('')),
+            ], check=True, capture_output=True, text=True)
+            self.run_case(name, 0)
 
     def test_positions_and_round_safe_area(self):
         self.assertRegex(self.board, r'#define TALK_GPIO GPIO_NUM_1')

@@ -376,9 +376,8 @@ menu "Muse"
             The state label ("READY") and the captions the firmware shows
             itself ("CAN'T REACH MUSE"). Muse's replies are in whatever
             language you speak to it, and the serial console stays in
-            English for the tools that read it. The button menu and the
-            pairing card are translated; the touch boards' settings pages
-            aren't yet.
+            English for the tools that read it. Simplified Chinese also
+            translates the touch settings pages.
 
         config MUSE_UI_LANG_EN
             bool "English"
@@ -386,6 +385,12 @@ menu "Muse"
         config MUSE_UI_LANG_VI
             bool "Vietnamese"
             select MUSE_LATIN_FONT
+
+        config MUSE_UI_LANG_ZH
+            bool "Simplified Chinese"
+            depends on MUSE_BOARD_M5STACK_STOPWATCH
+            select MUSE_CJK_FONT
+            select MUSE_CJK_FONT_NOTO
     endchoice
 
     choice MUSE_JC3248W535_MIC
