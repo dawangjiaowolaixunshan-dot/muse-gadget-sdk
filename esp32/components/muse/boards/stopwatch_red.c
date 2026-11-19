@@ -42,6 +42,8 @@ static const uint32_t ACCENT[MUSE_MODE_COUNT] = {
 static decoder_t *s_decoder;
 static muse_vdec_t *s_codec;
 static uint16_t *s_shown;
+static uint16_t s_xmap[PANEL];
+static int s_canvas = PANEL, s_source = RED_SIZE;
 static bool s_init, s_failed, s_dirty, s_prev_call, s_prev_ending;
 static uint8_t s_clip = RED_REST, s_choices[RED_COUNT];
 static unsigned s_lips;
@@ -70,9 +72,26 @@ static int min_int(int a, int b)
     return a < b ? a : b;
 }
 
+static int panel_coord(int position)
+{
+    return s_canvas == PANEL ? position : (2 * position + 1) * PANEL / (2 * s_canvas);
+}
+
+static int sample_axis(int position, const uint16_t *map)
+{
+    return s_source == RED_SIZE ? map[position] : (2 * position + 1) * s_source / (2 * PANEL);
+}
+
+static void map_x(void)
+{
+    for (int x = 0; x < s_canvas; ++x) s_xmap[x] = sample_axis(panel_coord(x), red_xmap);
+}
+
 void muse_pixel_set_size(int px)
 {
-    (void)px;   /* The portrait and its footer always share one fixed 466 px camera. */
+    if (px < 1 || px > PANEL) return;
+    s_canvas = px;
+    map_x();
     s_dirty = true;
 }
 
@@ -87,6 +106,7 @@ static bool decode(int target, bool returning, bool live)
      * can take longer than one frame interval on the StopWatch. */
     int last = returning ? target : min_int(target, first + (live ? 0 : 1));
     int64_t start = esp_timer_get_time();
+    int side = clip->side;
     muse_pic_t pic;
     for (int i = first; i <= last; ++i) {
         unsigned n = clip->frame + i;
@@ -95,12 +115,16 @@ static bool decode(int target, bool returning, bool live)
         /* tinyh264 removes emulation bytes in place. The embedded stream is read-only. */
         memcpy(s_decoder->packet, red_asset + red_offsets[n], len);
         if (muse_vdec_decode(s_codec, s_decoder->packet, len, &pic) != MUSE_VDEC_PICTURE ||
-            pic.w != RED_SIZE || pic.h != RED_SIZE) return false;
+            pic.w != side || pic.h != side) return false;
     }
-    muse_yuv_1x(pic.y, pic.u, pic.v, pic.y_stride, pic.c_stride, RED_SIZE,
-                RED_SIZE, (uint8_t *)s_shown, RED_SIZE * 2);
+    if (s_source != side) {
+        s_source = side;
+        map_x();
+    }
+    muse_yuv_1x(pic.y, pic.u, pic.v, pic.y_stride, pic.c_stride, side,
+                side, (uint8_t *)s_shown, side * 2);
     /* The full-size portrait is assembled only in LVGL's output strips. */
-    for (size_t i = 0; i < RED_SIZE * RED_SIZE; ++i) {
+    for (size_t i = 0; i < (size_t)side * side; ++i) {
         s_shown[i] = __builtin_bswap16(s_shown[i]);
     }
     unsigned elapsed = (unsigned)(esp_timer_get_time() - start);
@@ -160,6 +184,7 @@ void muse_pixel_render(const muse_pose_t *p)
         s_decoder = heap_caps_aligned_calloc(16, 1, sizeof(*s_decoder), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (s_decoder) {
             s_shown = s_decoder->frame;
+            map_x();
             s_codec = muse_vdec_open(MUSE_VIDEO_CODEC_H264, RED_SIZE, RED_SIZE);
         }
         if (!s_codec) {
@@ -272,27 +297,30 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
             memset(dst, 0, bytes);
             continue;
         }
-        int sy = red_ymap[y];
-        int dy = y - s_lip_y;
+        int py = panel_coord(y);
+        int sy = sample_axis(py, red_ymap);
+        int dy = py - s_lip_y;
         bool mouth = s_lips && dy >= -height-2 && dy <= height+2;
         if (sy == previous_sy && !mouth && !previous_mouth) {
             memcpy(dst, dst - stride_px, bytes);
         } else {
-            const uint16_t *row = s_shown + sy * RED_SIZE;
-            for (int x = x0; x <= x1; ++x) dst[x-x0] = row[red_xmap[x]];
+            const uint16_t *row = s_shown + sy * s_source;
+            for (int x = x0; x <= x1; ++x) dst[x-x0] = row[s_xmap[x]];
         }
         previous_sy = sy;
         previous_mouth = mouth;
         if (!mouth) continue;
-        int start = x0 > s_lip_x-width ? x0 : s_lip_x-width;
-        int stop = min_int(x1, s_lip_x+width);
-        const uint16_t *lip_row = s_shown + red_ymap[y + (dy < 0 ? 1 : -1)] * RED_SIZE;
+        int lip_left = (s_lip_x - width) * s_canvas / PANEL;
+        int start = x0 > lip_left ? x0 : lip_left;
+        int stop = min_int(x1, (s_lip_x + width) * s_canvas / PANEL);
+        const uint16_t *lip_row = s_shown + sample_axis(py + (dy < 0 ? 1 : -1), red_ymap) * s_source;
         for (int x = start; x <= stop; ++x) {
-            int dx = x - s_lip_x;
+            int dx = panel_coord(x) - s_lip_x;
+            if (dx < -width || dx > width) continue;
             int opening = height * (width*width - dx*dx) / (width*width);
             int distance = dy < 0 ? -dy : dy;
             if (distance > opening+1) continue;
-            uint16_t color = distance < opening ? 0x3823 : lip_row[red_xmap[x]];
+            uint16_t color = distance < opening ? 0x3823 : lip_row[s_xmap[x]];
             dst[x-x0] = blend565(dst[x-x0], color, distance < opening ? 14 : 8);
         }
     }

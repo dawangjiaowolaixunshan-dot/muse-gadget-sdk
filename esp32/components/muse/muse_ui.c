@@ -71,9 +71,13 @@ static const char *TAG = "muse_ui";
 
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
 #define STOPWATCH_PORTRAIT 1
+#include "esp_attr.h"
+#include "muse_watch_dialogue.h"
 #else
 #define STOPWATCH_PORTRAIT 0
 #endif
+
+#define HAS_REPLY_TILE (CONFIG_MUSE_LATEST_REPLY || STOPWATCH_PORTRAIT)
 
 #define METER_SEGS 14
 #define METER_SEG_PX 9
@@ -174,7 +178,7 @@ bool muse_ui_volume_swiping(void)
     return s_volume_swiping;
 }
 static lv_obj_t *s_settings;
-#if CONFIG_MUSE_LATEST_REPLY
+#if HAS_REPLY_TILE
 #define PAGE_DOTS 3
 #else
 #define PAGE_DOTS 2
@@ -1377,6 +1381,145 @@ static void on_volume_swipe(lv_event_t *e)
 #if STOPWATCH_PORTRAIT
 LV_FONT_DECLARE(stopwatch_face_font);
 static lv_obj_t *s_portrait_footer, *s_portrait_meter, *s_portrait_bars[5];
+static lv_obj_t *s_watch_captions, *s_watch_history, *s_watch_history_list;
+static bool s_watch_compact, s_watch_history_open;
+static uint32_t s_watch_history_revision;
+
+typedef struct {
+    lv_obj_t *row;
+    lv_obj_t *role;
+    lv_obj_t *body;
+} watch_caption_row_t;
+
+static watch_caption_row_t s_watch_rows[2];
+
+static void watch_caption_row_create(lv_obj_t *parent, watch_caption_row_t *row)
+{
+    row->row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row->row);
+    lv_obj_remove_flag(row->row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(row->row, 306, 84);
+    row->role = make_label(row->row, caption_font(), 0xeea396);
+    row->body = make_label(row->row, caption_font(), 0xffead7);
+    lv_label_set_long_mode(row->body, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_width(row->body, 306);
+    lv_obj_set_style_text_line_space(row->body, 3, 0);
+    lv_obj_set_y(row->body, 19);
+}
+
+static void build_watch_history(lv_obj_t *tileview)
+{
+    s_watch_history = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
+    lv_obj_set_style_bg_color(s_watch_history, lv_color_hex(0x1c1015), 0);
+    lv_obj_set_style_bg_opa(s_watch_history, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(s_watch_history, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *title = make_label(s_watch_history, caption_font(), 0xffead7);
+    lv_label_set_text(title, "聊天记录");
+    lv_obj_set_style_text_letter_space(title, 3, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 65);
+    s_watch_history_list = lv_obj_create(s_watch_history);
+    lv_obj_remove_style_all(s_watch_history_list);
+    lv_obj_set_size(s_watch_history_list, 304, 278);
+    lv_obj_align(s_watch_history_list, LV_ALIGN_TOP_MID, 0, 106);
+    lv_obj_set_scroll_dir(s_watch_history_list, LV_DIR_VER);
+    lv_obj_add_flag(s_watch_history_list, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
+    lv_obj_set_scrollbar_mode(s_watch_history_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(s_watch_history_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_watch_history_list, 7, 0);
+}
+
+static void watch_history_line(const char *role, const char *text)
+{
+    if (!*text) return;
+    lv_obj_t *entry = lv_obj_create(s_watch_history_list);
+    lv_obj_remove_style_all(entry);
+    lv_obj_set_size(entry, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_remove_flag(entry, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(entry, 12, 0);
+    lv_obj_set_style_bg_opa(entry, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(entry, lv_color_hex(0x342027), 0);
+    lv_obj_set_style_pad_all(entry, 11, 0);
+    lv_obj_set_flex_flow(entry, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(entry, 4, 0);
+    lv_obj_t *name = make_label(entry, caption_font(), 0xeea396);
+    lv_label_set_text(name, role);
+    lv_obj_set_flag(name, LV_OBJ_FLAG_HIDDEN, !*role);
+    lv_obj_t *body = make_label(entry, caption_font(), 0xffead7);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_line_space(body, 4, 0);
+    lv_label_set_text(body, text);
+}
+
+static void watch_history_tick(bool open)
+{
+    if (!open) {
+        if (s_watch_history_open) lv_obj_clean(s_watch_history_list);
+        s_watch_history_open = false;
+        return;
+    }
+    uint32_t revision = muse_watch_dialogue_revision();
+    if (s_watch_history_open && s_watch_history_revision == revision) return;
+    static EXT_RAM_BSS_ATTR muse_watch_turn_text_t turns[MUSE_WATCH_HISTORY_MAX];
+    size_t count = muse_watch_dialogue_history(turns, MUSE_WATCH_HISTORY_MAX);
+    lv_obj_clean(s_watch_history_list);
+    if (!count) watch_history_line("", "还没有对话");
+    for (size_t i = 0; i < count; ++i) {
+        watch_history_line("我", turns[i].question);
+        watch_history_line("豆姐", turns[i].reply);
+    }
+    if (!s_watch_history_open) {
+        lv_obj_update_layout(s_watch_history_list);
+        lv_obj_scroll_to_y(s_watch_history_list, lv_obj_get_scroll_bottom(s_watch_history_list), LV_ANIM_OFF);
+        ESP_LOGI(TAG, "watch history: opened turns=%u", (unsigned)count);
+    }
+    s_watch_history_open = true;
+    s_watch_history_revision = revision;
+}
+
+static void watch_caption_set(watch_caption_row_t *row, const muse_watch_caption_t *caption)
+{
+    lv_obj_set_flag(row->row, LV_OBJ_FLAG_HIDDEN, !caption->serial);
+    if (!caption->serial) return;
+    const char *role = caption->reply ? "豆姐" : "我";
+    if (strcmp(lv_label_get_text(row->role), role)) lv_label_set_text(row->role, role);
+    if (strcmp(lv_label_get_text(row->body), caption->text)) lv_label_set_text(row->body, caption->text);
+}
+
+static void watch_caption_position(watch_caption_row_t *row, int y, int opacity)
+{
+    if (lv_obj_has_flag(row->row, LV_OBJ_FLAG_HIDDEN)) return;
+    if (lv_obj_get_style_y(row->row, LV_PART_MAIN) != y) lv_obj_set_y(row->row, y);
+    if (lv_obj_get_style_opa(row->row, LV_PART_MAIN) != opacity)
+        lv_obj_set_style_opa(row->row, opacity, 0);
+}
+
+static void watch_caption_tick(void)
+{
+    static uint32_t logged;
+    int64_t now = esp_timer_get_time();
+    muse_watch_dialogue_view_t view;
+    muse_watch_dialogue_view(now, &view);
+    watch_caption_set(&s_watch_rows[0], &view.previous);
+    watch_caption_set(&s_watch_rows[1], &view.current);
+    if (!view.current.serial) return;
+    if (logged != view.current.serial) {
+        ESP_LOGI(TAG, "watch caption: serial=%lu reply=%d cue=%lu played=%lu",
+                 (unsigned long)view.current.serial, view.current.reply,
+                 (unsigned long)view.current.audio_at, (unsigned long)view.current.played);
+        logged = view.current.serial;
+    }
+    // Ease both rows together over the approved 750 ms transition.
+    int elapsed = (int)((now - view.started_us) / 1000);
+    int left = elapsed >= 750 ? 0 : 750 - elapsed;
+    int remainder = left * left * 255 / (750 * 750);
+    lv_point_t size = {0};
+    lv_text_get_size(&size, view.previous.text, caption_font(), 0, 3, 306, LV_TEXT_FLAG_NONE);
+    int row_height = LV_CLAMP(44, size.y + 27, 84);
+    int travel = remainder * row_height / 255;
+    watch_caption_position(&s_watch_rows[0], 43 - row_height + travel, 84 + remainder * 143 / 255);
+    watch_caption_position(&s_watch_rows[1], 43 + travel, 255 - remainder);
+}
 
 static void build_portrait_footer(lv_obj_t *face)
 {
@@ -1417,6 +1560,15 @@ static void build_portrait_footer(lv_obj_t *face)
     lv_obj_set_style_text_line_space(s_caption_lbl, CAPTION_LINE_SPACE, 0);
     lv_obj_align(s_caption_lbl, LV_ALIGN_CENTER, 0, 156);
     lv_obj_add_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN);
+    s_watch_captions = lv_obj_create(face);
+    lv_obj_remove_style_all(s_watch_captions);
+    lv_obj_remove_flag(s_watch_captions, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_watch_captions, 306, 128);
+    lv_obj_align(s_watch_captions, LV_ALIGN_TOP_MID, 0, 265);
+    lv_obj_add_flag(s_watch_captions, LV_OBJ_FLAG_HIDDEN);
+    for (size_t i = 0; i < sizeof(s_watch_rows) / sizeof(s_watch_rows[0]); i++) {
+        watch_caption_row_create(s_watch_captions, &s_watch_rows[i]);
+    }
 }
 
 static const char *portrait_state(muse_mode_t mode, muse_voice_view_t call)
@@ -1463,6 +1615,14 @@ static void update_portrait(muse_mode_t mode, float now)
         problem_until = now + (reconnecting ? 8.0f : (failed || unreachable) ? 4.0f : 0);
     }
     muse_voice_view_t call = muse_voice_call_view();
+    bool compact = call != MUSE_VOICE_VIEW_NONE && call != MUSE_VOICE_VIEW_ENDING;
+    if (compact != s_watch_compact) {
+        s_watch_compact = compact;
+        move_muse(compact ? 236 : s_canvas_px, compact ? -92 : 0);
+        lv_obj_align(s_portrait_footer, LV_ALIGN_CENTER, 0, compact ? 22 : 174);
+        lv_obj_set_flag(s_watch_captions, LV_OBJ_FLAG_HIDDEN, !compact);
+    }
+    if (compact) watch_caption_tick();
     const char *text = portrait_state(mode, call);
     if (mode == MUSE_MODE_IDLE && call == MUSE_VOICE_VIEW_NONE && now < problem_until) text = notice;
     bool ready = call == MUSE_VOICE_VIEW_NONE || call == MUSE_VOICE_VIEW_READY;
@@ -1478,7 +1638,8 @@ static void update_portrait(muse_mode_t mode, float now)
     bool speak = call == MUSE_VOICE_VIEW_SPEAKING || (call == MUSE_VOICE_VIEW_NONE && mode == MUSE_MODE_SPEAKING);
     bool reading = !muse_settings_speaker_on() && (speak || mode == MUSE_MODE_THINKING) &&
                    call != MUSE_VOICE_VIEW_CONNECTING && call != MUSE_VOICE_VIEW_ENDING;
-    bool show_caption = caption[0] && (hint || mode == MUSE_MODE_ERROR || reading);
+    bool show_caption = caption[0] && (mode == MUSE_MODE_ERROR || reading || (!compact && hint));
+    lv_obj_set_flag(s_watch_captions, LV_OBJ_FLAG_HIDDEN, !compact || show_caption);
     if (show_caption && (fresh || lv_obj_has_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN))) {
 #if CONFIG_MUSE_CJK_FONT || CONFIG_MUSE_LATIN_FONT || CONFIG_MUSE_LATEST_REPLY
         const lv_font_t *font = caption_font_for(caption);
@@ -1490,6 +1651,8 @@ static void update_portrait(muse_mode_t mode, float now)
         lv_obj_set_style_text_font(s_caption_lbl, font, 0);
         lv_label_set_text(s_caption_lbl, live_caption_tail(caption, &box));
     }
+    if (show_caption && (fresh || lv_obj_has_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN)))
+        lv_obj_align(s_caption_lbl, LV_ALIGN_CENTER, 0, compact ? 53 : 156);
     lv_obj_set_flag(s_caption_lbl, LV_OBJ_FLAG_HIDDEN, !show_caption);
     lv_obj_set_flag(s_portrait_footer, LV_OBJ_FLAG_HIDDEN, !*text || show_caption);
     if (show_caption || !*text) return;
@@ -1523,7 +1686,10 @@ static void build_screen(void)
         lv_obj_set_style_bg_color(s_tv, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
         lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
-#if CONFIG_MUSE_LATEST_REPLY
+#if STOPWATCH_PORTRAIT
+        build_watch_history(s_tv);
+        s_face = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
+#elif CONFIG_MUSE_LATEST_REPLY
         muse_latest_reply_build(s_tv, caption_font_for);
         s_face = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
 #else
@@ -1537,7 +1703,7 @@ static void build_screen(void)
         lv_obj_set_style_bg_color(s_face, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_face, LV_OPA_COVER, 0);
         s_settings = lv_tileview_add_tile(s_tv,
-#if CONFIG_MUSE_LATEST_REPLY
+#if HAS_REPLY_TILE
             2,
 #else
             1,
@@ -2116,7 +2282,7 @@ static void update_chrome(float now)
         s_swipe_enabled = !page || !subpage;
         update_tileview_swipe();
         bool hide_dots = (page && subpage) || (STOPWATCH_PORTRAIT && s_face_active);
-#if CONFIG_MUSE_LATEST_REPLY
+#if HAS_REPLY_TILE
         int selected = page ? 2 : lv_tileview_get_tile_active(s_tv) == s_face ? 1 : 0;
 #else
         int selected = page;
@@ -2129,7 +2295,10 @@ static void update_chrome(float now)
             }
             s_shown_page = shown;
         }
-#if CONFIG_MUSE_LATEST_REPLY
+#if STOPWATCH_PORTRAIT
+        watch_history_tick(lv_tileview_get_tile_active(s_tv) == s_watch_history);
+#endif
+#if HAS_REPLY_TILE
         muse_settings_ui_tick(page);
 #else
         muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
@@ -2510,6 +2679,12 @@ void muse_ui_bench_page(bool settings)
 {
     s_bench_page = settings ? 1 : 0;   /* applied in the LVGL task */
 }
+#if STOPWATCH_PORTRAIT
+void muse_ui_bench_history(void)
+{
+    s_bench_page = 2;
+}
+#endif
 #endif
 
 /* Streams the screen over the USB cable as base64 RGB565 (bench testing; needs
@@ -2559,9 +2734,13 @@ static void frame_tick(lv_timer_t *timer)
 {
 #if LV_USE_SNAPSHOT
     if (s_bench_page >= 0) {
-        bool settings = s_bench_page != 0;
+        int page = s_bench_page;
         s_bench_page = -1;
-        if (s_tv) lv_tileview_set_tile(s_tv, settings ? s_settings : s_face, LV_ANIM_OFF);
+        lv_obj_t *tile = page ? s_settings : s_face;
+#if STOPWATCH_PORTRAIT
+        if (page == 2) tile = s_watch_history;
+#endif
+        if (s_tv) lv_tileview_set_tile(s_tv, tile, LV_ANIM_OFF);
     }
 #endif
 #if CONFIG_MUSE_LATEST_REPLY
@@ -2617,7 +2796,7 @@ static void frame_tick(lv_timer_t *timer)
         return;   /* the image covers the face */
     }
     if (s_tv && lv_obj_get_scroll_x(s_tv) !=
-#if CONFIG_MUSE_LATEST_REPLY
+#if HAS_REPLY_TILE
         s_w
 #else
         0
@@ -2625,6 +2804,10 @@ static void frame_tick(lv_timer_t *timer)
     ) {
         /* Off screen, or sliding to or from settings: hold still so the
          * slide gets the whole frame time. */
+#if STOPWATCH_PORTRAIT
+        muse_watch_dialogue_view_t view;
+        muse_watch_dialogue_view(esp_timer_get_time(), &view);
+#endif
         return;
     }
 

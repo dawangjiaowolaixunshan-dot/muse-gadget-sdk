@@ -963,6 +963,13 @@ static bool console_command(char *line, bool whole)
         muse_ui_bench_demo(!strcmp(line, "ui.demo=1"));
         return true;
     }
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE
+    if (!strcmp(line, "ui=history")) {
+        extern void muse_ui_bench_history(void);
+        muse_ui_bench_history();
+        return true;
+    }
+#endif
     if (!strcmp(line, "ui=settings") || !strcmp(line, "ui=face")) {
         muse_ui_bench_page(!strcmp(line, "ui=settings"));
         return true;

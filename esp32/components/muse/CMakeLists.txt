@@ -83,7 +83,7 @@ if(CONFIG_MUSE_ENABLED)
     # default is in avatar/ at the top of the project.
     file(GLOB custom_avatar CONFIGURE_DEPENDS "${COMPONENT_DIR}/avatar/muse_pixel.c")
     if(CONFIG_MUSE_BOARD_M5STACK_STOPWATCH AND CONFIG_MUSE_REALTIME_VOICE)
-        list(APPEND srcs "boards/stopwatch_red.c" "fonts/stopwatch_face_font.c")
+        list(APPEND srcs "boards/stopwatch_red.c" "muse_watch_dialogue.c" "fonts/stopwatch_face_font.c")
         list(APPEND embed "boards/stopwatch_red.h264")
     elseif(custom_avatar)
         message(STATUS "Custom avatar: components/muse/avatar/muse_pixel.c")

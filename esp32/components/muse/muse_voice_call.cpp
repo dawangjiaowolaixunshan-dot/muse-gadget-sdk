@@ -73,6 +73,9 @@
 #include "muse_voice_call.h"
 #include "muse_voice_call_core.h"
 #include "muse_voice_call_priv.h"
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+#include "muse_watch_dialogue.h"
+#endif
 
 static const char *TAG = "muse_call";
 
@@ -155,6 +158,10 @@ static std::atomic<uint32_t> s_in_written{0};      /* bytes the voice task put i
 static bool v_call, v_ptt, v_talking, v_overflow;   /* v_call: a call, until its ENDED is read */
 static uint32_t v_press;             /* the last press number */
 static uint32_t v_press_told;        /* the press read() last reported as a flush */
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+static int64_t v_first_audio_at;
+static bool v_playback_started;
+#endif
 
 /* Session task only. */
 /* The large buffers below live in PSRAM: only tasks touch them, and internal
@@ -700,6 +707,9 @@ static void wait_to_defer(void)
             reply_lost();
             return;
         }
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        muse_watch_dialogue_received(s_press, n);
+#endif
         ring_pop(&s_wait, n);
     }
 }
@@ -842,6 +852,9 @@ static void play(const muse_vc_event_t &ev, int64_t now)
             }
             return;
         }
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        muse_watch_dialogue_received(s_press, (size_t)n);
+#endif
         defer_flush();
         if (ptt_playable() && !s_defer.len && xStreamBufferSpacesAvailable(s_out) >= bytes) {
             out_write(s_pcm, (size_t)n);
@@ -884,6 +897,16 @@ static void on_line(void *ctx, const char *line, size_t len)
     bool before = s_call.state == MUSE_VC_LIVE;
     /* In a push-to-talk call, reply captions only while Muse answers the last hold. */
     bool captions = !s_ptt || muse_vc_reply_gate_captions(s_gate);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    if (s_ptt && before && (ev.kind == MUSE_VC_EV_USER_TEXT ||
+            (captions && (ev.kind == MUSE_VC_EV_REPLY_TEXT || ev.kind == MUSE_VC_EV_REPLY_DONE)))) {
+        char transcript[640];
+        if (muse_vc_json_unescape(ev.text, transcript, sizeof(transcript))) {
+            if (ev.kind == MUSE_VC_EV_USER_TEXT) muse_watch_dialogue_heard(s_press, transcript, now);
+            else muse_watch_dialogue_reply(s_press, transcript, ev.kind == MUSE_VC_EV_REPLY_DONE);
+        }
+    }
+#endif
     switch (ev.kind) {
     case MUSE_VC_EV_RESPONSE_CREATED:
         s_reply[0] = '\0';
@@ -1467,6 +1490,11 @@ extern "C" void muse_voice_call_start_ptt(void)
     v_call = v_ptt = v_talking = true;
     v_overflow = false;
     v_press = s_press_req.fetch_add(1) + 1;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    muse_watch_dialogue_begin(v_press, true);
+    v_playback_started = false;
+    v_first_audio_at = 0;
+#endif
     drain_out();
     s_flush_ack.store(s_flush_req.load());
     publish_start(true);
@@ -1481,6 +1509,11 @@ extern "C" void muse_voice_call_set_talking(bool held)
     if (held) {
         v_overflow = false;
         v_press = s_press_req.fetch_add(1) + 1;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        muse_watch_dialogue_begin(v_press, false);
+        v_playback_started = false;
+        v_first_audio_at = 0;
+#endif
         drain_out();   /* the old reply stops now; read() finishes the fence */
     }
     talk_word(s_gen.load(), held);
@@ -1491,6 +1524,9 @@ extern "C" void muse_voice_call_end(void)
 {
     if (s_inited) {
         if (v_ptt) {
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            muse_watch_dialogue_stop(v_press);
+#endif
             talk_word(s_gen.load(), false);
         }
         v_talking = false;
@@ -1560,7 +1596,22 @@ extern "C" size_t muse_voice_call_read(int16_t *pcm, size_t frames, bool *flushe
         v_press_told = press;
         return 0;
     }
-    return xStreamBufferReceive(s_out, pcm, frames * sizeof(int16_t), 0) / sizeof(int16_t);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    if (v_ptt && !v_playback_started) {
+        size_t available = xStreamBufferBytesAvailable(s_out);
+        if (!available) return 0;
+        int64_t now = now_us();
+        if (!v_first_audio_at) v_first_audio_at = now;
+        const size_t preroll_bytes = MUSE_VC_MIC_RATE * sizeof(int16_t) * 60 / 1000;
+        if (available < preroll_bytes && now - v_first_audio_at < 80000) return 0;
+        v_playback_started = true;
+    }
+#endif
+    size_t taken = xStreamBufferReceive(s_out, pcm, frames * sizeof(int16_t), 0) / sizeof(int16_t);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    if (taken && v_ptt) muse_watch_dialogue_played(press, taken, now_us());
+#endif
+    return taken;
 }
 
 extern "C" muse_voice_call_ev_t muse_voice_call_event(char *text, size_t cap)
