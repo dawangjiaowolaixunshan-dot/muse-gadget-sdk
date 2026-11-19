@@ -19,7 +19,7 @@
 #include "muse_pixel.h"
 
 typedef void lv_timer_t;
-static bool s_snapshot;
+static bool s_snapshot, s_dark, s_avatar_tapped, sleep_requested;
 static float s_level;
 static muse_mode_t s_last_mode=MUSE_MODE_COUNT, mode;
 static muse_mode_t s_last_epaper_pose=MUSE_MODE_COUNT;
@@ -37,7 +37,7 @@ static void muse_ui_show_face(void) {}
 static bool s_note_listening;
 static void update_tileview_swipe(void) {}
 #endif
-static bool update_sleep(void) { return false; }
+static bool update_sleep(void) { return s_dark = sleep_requested; }
 static void update_chrome(float now) { (void)now; }
 static bool muse_menu_tick(float now) { (void)now; return false; }
 static int lv_obj_get_scroll_x(void *obj) { (void)obj; return 0; }
@@ -69,5 +69,23 @@ int main(int argc,char **argv)
     view=MUSE_VOICE_VIEW_SPEAKING; source_level=0.9f;
     frame_tick(NULL);
     assert(fabsf(rendered.level-0.048f)<0.0001f); /* only the previous mic level decays */
+
+    assert(rendered.in_call && !rendered.ending);
+    mode=MUSE_MODE_THINKING; view=MUSE_VOICE_VIEW_ENDING;
+    frame_tick(NULL);
+    assert(rendered.ending);
+
+    mode=MUSE_MODE_IDLE; view=MUSE_VOICE_VIEW_NONE;
+    s_avatar_tapped=true;
+    sleep_requested=true;
+    frame_tick(NULL);
+    assert(rendered.ending && !s_avatar_tapped); /* asleep: no avatar render or tap */
+    sleep_requested=false;
+    frame_tick(NULL);
+    assert(rendered.woke && !rendered.ending && !rendered.in_call && !rendered.touched);
+
+    s_avatar_tapped=true;
+    frame_tick(NULL);
+    assert(rendered.touched && !rendered.woke && !s_avatar_tapped);
     return 0;
 }
