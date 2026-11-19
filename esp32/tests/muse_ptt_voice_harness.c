@@ -228,6 +228,7 @@ void muse_voice_call_ptt_status(muse_voice_call_ptt_status_t *s) {
     *s=(muse_voice_call_ptt_status_t){.connecting=!ready_event,.live=ready_event,.talking=held,
         .capture=held&&!need_end&&!hold_status,.hold=hold_status,
         .sending=delivered>0 && frame<(scenario==1?18:14),.heard=scenario==1,
+        .reply_open=scenario==1 && frame>=6 && frame<=8,
         .reply_done=reply_done,.working=working};
 }
 bool muse_voice_call_audio(const int16_t *p,size_t n) {
@@ -375,6 +376,7 @@ esp_err_t muse_audio_read(int16_t *p,size_t n) {
     if (terminate_task && frame>(scenario==20 || scenario==21 ? 40 : 20)) longjmp(finish,1);
     if (scenario==1) {
         if(frame==3 || frame==10) push(MUSE_PTT_UP);
+        if(frame==7) clock_us+=180000; /* one packet gap, beyond the normal speaker tail */
         if(frame==8) push(MUSE_PTT_DOWN);
         if(frame==9) notes_mode=true; /* changing the setting cannot end/change the call */
         if(frame==11) push(MUSE_PTT_DOWN);
@@ -801,7 +803,14 @@ int main(int argc,char **argv) {
         assert(views[2]==MUSE_VOICE_VIEW_LISTENING && level_at[2]==0.102f);
         assert(mic_at[3] && views[3]==MUSE_VOICE_VIEW_THINKING && !level_at[3]);
         assert(mic_at[4] && mic_at[5] && !mic_at[6]); /* delayed last syllable, then deadline */
-        assert(speaker_at[6]==25000 && views[6]==MUSE_VOICE_VIEW_SPEAKING && level_at[6]==25.0f);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        assert(speaker_at[6]==29589 && level_at[6]==29.589f);
+        assert(views[7]==MUSE_VOICE_VIEW_SPEAKING && !speaker_at[7] && !level_at[7]);
+        assert(views[8]!=MUSE_VOICE_VIEW_SPEAKING);
+#else
+        assert(speaker_at[6]==25000 && level_at[6]==25.0f);
+#endif
+        assert(views[6]==MUSE_VOICE_VIEW_SPEAKING);
         assert(!mic_at[8] && !speaker_at[8]); /* DOWN arrived during blocking read */
         assert(mic_at[9] && !speaker_at[9] && views[9]==MUSE_VOICE_VIEW_LISTENING && level_at[9]==0.109f);
         assert(mic_at[10] && !mic_at[11] && mic_at[12]);

@@ -76,14 +76,16 @@ void muse_pixel_set_size(int px)
     s_dirty = true;
 }
 
-static bool decode(int target, bool returning)
+static bool decode(int target, bool returning, bool live)
 {
     const red_clip_t *clip = &red_clips[s_clip];
     /* A rewind starts at an IDR. Answer clips use short groups so the
      * requested pose can be published in the same render tick. */
     int first = target / clip->group * clip->group;
     if (target > s_frame && first <= s_frame) first = s_frame + 1;
-    int last = returning ? target : min_int(target, first + 1);
+    /* Catch up over multiple UI ticks during a call. Two consecutive decodes
+     * can take longer than one frame interval on the StopWatch. */
+    int last = returning ? target : min_int(target, first + (live ? 0 : 1));
     int64_t start = esp_timer_get_time();
     muse_pic_t pic;
     for (int i = first; i <= last; ++i) {
@@ -225,7 +227,7 @@ void muse_pixel_render(const muse_pose_t *p)
         frame = min_int((int)(age * 3.1f * RED_FPS), red_clips[s_clip].count - 1);
     }
     if (frame != s_frame) {
-        if (!decode(frame, s_returning)) {
+        if (!decode(frame, s_returning, p->in_call)) {
             ESP_LOGE(TAG, "could not decode %s frame %d", CLIP_NAME[s_clip], frame);
             s_failed = true;
             s_dirty = true;

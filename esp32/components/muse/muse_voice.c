@@ -1062,6 +1062,7 @@ static bool can_record(void)
 /* Calls: how far the speaker runs behind a write, and how long the mic stays
  * shut after Muse's voice stops (these boards have no echo cancellation). */
 #define CALL_SPEAKER_LAG_US 120000
+#define WATCH_REPLY_GAP_US 420000
 #define CALL_TAIL_US 300000
 #define CALL_END_WAIT_US (20LL * 1000000)   /* hung up: wait this long for the call to wind down */
 #define CALL_RELEASE_US 120000            /* bounded capture lag, as for voice notes */
@@ -1151,6 +1152,9 @@ static void run_call(bool ptt, size_t waking_chunks)
     call_ui_t c = { .ptt = ptt, .held = ptt, .input_epoch = s_press_input_epoch };
     muse_vc_gate_init(&c.gate, false, ptt ? 0 : CALL_TAIL_US);
     bool ended = false;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    int64_t reply_view_until = 0;
+#endif
     atomic_store(&s_ptt_call, ptt);
     call_view(MUSE_VOICE_VIEW_CONNECTING);
     muse_input_clear_call_pending(s_press_mark);
@@ -1261,6 +1265,9 @@ static void run_call(bool ptt, size_t waking_chunks)
         if (flushed) muse_vc_gate_flush(&c.gate, now);
         if (n) {
             muse_vc_gate_playout(&c.gate, out, n, now, CALL_SPEAKER_LAG_US);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            muse_vc_boost_reply(out, n);
+#endif
             muse_audio_write(out, n);
         } else {
             muse_audio_write(silence, MUSE_AUDIO_CHUNK);
@@ -1285,6 +1292,18 @@ static void run_call(bool ptt, size_t waking_chunks)
         }
 #endif
         bool speaking = !muse_vc_gate_mic_open(&c.gate, now) && !(ptt && (c.held || c.release_until));
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        if (c.held || c.release_until || c.server_hold || c.hung_up || flushed) {
+            reply_view_until = 0;
+        } else if (n && speaking) {
+            reply_view_until = now + WATCH_REPLY_GAP_US;
+        }
+        /* A short pause in an open reply should close the mouth without
+         * restarting the answer gesture. A press still wins immediately. */
+        if (ptt && status.reply_open && !status.reply_done && now < reply_view_until) {
+            speaking = true;
+        }
+#endif
         if (ptt && !c.held && !status.sending &&
             ((!status.heard && !status.reply_open) || (status.reply_done && !speaking))) c.awaiting = false;
         if (ptt && (status.heard || status.reply_open) && !status.reply_done) c.awaiting = true;
@@ -1331,6 +1350,9 @@ static void run_call(bool ptt, size_t waking_chunks)
             bool flushed;
             size_t n = muse_voice_call_read(out, MUSE_AUDIO_CHUNK, &flushed);
             if (!n) break;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            muse_vc_boost_reply(out, n);
+#endif
             muse_state_set_level(0);
             call_view(MUSE_VOICE_VIEW_SPEAKING);
             muse_state_set_level(muse_audio_level(out, n));

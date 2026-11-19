@@ -184,6 +184,8 @@ size_t muse_vc_resample_bound(int in_rate, int out_rate, size_t n);
  * across calls gives the same output as one call. */
 size_t muse_vc_resample(muse_vc_resampler_t *r, const int16_t *in, size_t n, int16_t *out);
 int muse_vc_peak(const int16_t *pcm, size_t n);
+/* Raises quiet speaker output by 3.5 dB, with a smooth knee below full scale. */
+void muse_vc_boost_reply(int16_t *pcm, size_t n);
 
 /* Mic (16 kHz) -> append lines (24 kHz, MUSE_VC_FRAME samples each). */
 typedef struct {

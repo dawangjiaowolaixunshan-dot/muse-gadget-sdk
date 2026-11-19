@@ -807,6 +807,20 @@ int muse_vc_peak(const int16_t *pcm, size_t n)
     return peak;
 }
 
+void muse_vc_boost_reply(int16_t *pcm, size_t n)
+{
+    enum { KNEE = 24576, HEADROOM = INT16_MAX - KNEE };
+    for (size_t i = 0; i < n; i++) {
+        int32_t sample = pcm[i];
+        int32_t magnitude = (sample < 0 ? -sample : sample) * 3 / 2;
+        if (magnitude > KNEE) {
+            int32_t excess = magnitude - KNEE;
+            magnitude = KNEE + HEADROOM * excess / (HEADROOM + excess);
+        }
+        pcm[i] = (int16_t)(sample < 0 ? -magnitude : magnitude);
+    }
+}
+
 #define UP_PIECE 320   /* input samples resampled at a time: at most 482 out */
 _Static_assert(sizeof(((muse_vc_uplink_t *)0)->piece) / sizeof(int16_t) >=
                    UP_PIECE * MUSE_VC_WIRE_RATE / MUSE_VC_MIC_RATE + 2,
