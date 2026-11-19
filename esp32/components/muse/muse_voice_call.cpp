@@ -225,6 +225,12 @@ static uint32_t s_st;                /* status bits (session's copy) */
 static int64_t s_wall_offset_ms;
 static bool s_wall_known;
 static uint32_t s_bad_lines, s_bad_audio, s_dropped_audio, s_frames_out;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+// Counts only. Keep the mic samples and transcript out of the console log.
+static struct {
+    unsigned mic_samples, mic_peak, sent, turns, replies, incoming_audio, rejected_audio;
+} s_live_trace;
+#endif
 
 static int64_t now_us(void)
 {
@@ -480,6 +486,14 @@ static bool run(uint32_t acts, bool allow_stop_drain = true)
                  s_call.call_id, muse_vc_end_caption(s_call.reason), (now - s_call.start_us) / 1e6,
                  (unsigned)s_frames_out, (unsigned)s_dropped_audio, (unsigned)s_bad_audio, (unsigned)s_bad_lines,
                  (unsigned)s_lines.skipped);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        if (s_ptt) {
+            ESP_LOGI(TAG, "live counts: mic_samples=%u mic_peak=%u sent=%u turns=%u replies=%u incoming=%u gate_drop=%u",
+                     s_live_trace.mic_samples, s_live_trace.mic_peak, s_live_trace.sent,
+                     s_live_trace.turns, s_live_trace.replies, s_live_trace.incoming_audio,
+                     s_live_trace.rejected_audio);
+        }
+#endif
         s_media_id = s_end_id = 0;
         emit(MUSE_VOICE_CALL_EV_ENDED, why);
     }
@@ -802,6 +816,9 @@ static void play(const muse_vc_event_t &ev, int64_t now)
             return;
         }
         if (verdict == MUSE_VC_GATE_DROP) {
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            s_live_trace.rejected_audio++;
+#endif
             return;   /* stale, unattributed, or no new turn to answer */
         }
     }
@@ -855,6 +872,11 @@ static void on_line(void *ctx, const char *line, size_t len)
         return;
     }
     int64_t now = now_us();
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    if (ev.kind == MUSE_VC_EV_AUDIO) s_live_trace.incoming_audio++;
+    if (ev.kind == MUSE_VC_EV_TURN_STARTED) s_live_trace.turns++;
+    if (ev.kind == MUSE_VC_EV_RESPONSE_CREATED) s_live_trace.replies++;
+#endif
     if (ev.kind == MUSE_VC_EV_AUDIO) {
         play(ev, now);
         return;
@@ -980,6 +1002,14 @@ static bool pump_ptt(int64_t now)
         size_t len, used;
         if (s_mic_off < s_mic_len) {
             used = muse_vc_uplink_push(&s_up, s_mic + s_mic_off, s_mic_len - s_mic_off, s_append, &len);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            s_live_trace.mic_samples += (unsigned)used;
+            for (size_t i = 0; i < used; i += 8) {
+                int sample = s_mic[s_mic_off + i];
+                unsigned magnitude = (unsigned)(sample < 0 ? -sample : sample);
+                if (magnitude > s_live_trace.mic_peak) s_live_trace.mic_peak = magnitude;
+            }
+#endif
             s_mic_off += used;
         } else if (!s_talk) {
             /* Released and the held audio is all up: quiet, the first
@@ -1003,6 +1033,9 @@ static bool pump_ptt(int64_t now)
             if (!muse_session_call_send(s_media_id, reinterpret_cast<const uint8_t *>(s_append), len, false)) {
                 return false;
             }
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            s_live_trace.sent++;
+#endif
             lines++;
         }
     }
@@ -1096,6 +1129,9 @@ static bool begin_call(uint32_t gen)
     s_drop = false;
     s_end_was_sent = s_end_final = false;
     s_bad_lines = s_bad_audio = s_dropped_audio = s_frames_out = 0;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+    s_live_trace = {};
+#endif
     char path[96];
     snprintf(path, sizeof(path), "/voice/realtime?call_id=%s", id);
     s_media_id = muse_session_call_open(true, path, "application/x-ndjson; charset=utf-8", admission, false);
