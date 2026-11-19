@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 
-PANEL, SIZE, FPS, GROUP = 466, 256, 12, 12
+PANEL, SIZE, FPS, GROUP = 466, 272, 12, 12
 NAMES = ("REST WAKE_EYES WAKE_NOD IDLE_HAIR IDLE_SHIFT LISTEN_EAR LISTEN_INTERRUPT "
          "THINK_CHIN THINK_IDEA ANSWER_PALM ANSWER_POINT TOUCH_SMILE TOUCH_KISS "
          "BYE_SLOW BYE_QUICK").split()
@@ -35,10 +35,10 @@ def sample_edges(screen, encoded):
     return np.interp(np.arange(SIZE + 1), encoded, screen).astype(np.float32)
 
 
-# Spend more samples across the hair, eyes and mouth. The same fixed map is
-# used for every frame, and the firmware reverses it in screen coordinates.
-X_EDGES = sample_edges((0, 76, 134, 318, 428, PANEL), (0, 17, 44, 195, 243, SIZE))
-Y_EDGES = sample_edges((0, 15, 207, 281, PANEL), (0, 8, 160, 199, SIZE))
+# Allocate samples across the whole figure, including the shoulders and
+# hand gesture area. The edge strips and the fade below the dress need few.
+X_EDGES = sample_edges((0, 70, 96, 134, 318, 377, 440, PANEL), (0, 5, 16, 38, 187, 225, 260, SIZE))
+Y_EDGES = sample_edges((0, 12, 206, 286, 416, PANEL), (0, 6, 157, 210, 269, SIZE))
 
 
 def area_sample(frame, edges, axis):
@@ -82,7 +82,7 @@ def pack(source, dest, ffmpeg):
             raw.extend(np.rint(sampled).astype(np.uint8).tobytes())
         args = [ffmpeg, "-v","error","-f","rawvideo","-pix_fmt","bgr24","-s",f"{SIZE}x{SIZE}",
                 "-r",str(FPS),"-i","pipe:0","-an","-c:v","libx264","-preset","medium",
-                "-crf","21","-profile:v","baseline","-pix_fmt","yuv420p","-threads","1",
+                "-crf","22.55","-profile:v","baseline","-pix_fmt","yuv420p","-threads","1",
                 "-x264-params",f"aud=1:repeat-headers=1:scenecut=0:keyint={GROUP}:min-keyint={GROUP}:ref=1",
                 "-f","h264","pipe:1"]
         encoded = subprocess.run(args,input=raw,stdout=subprocess.PIPE,check=True).stdout
@@ -107,8 +107,8 @@ def pack(source, dest, ffmpeg):
         out.write("".join(f"    [RED_{n}] = {{{i}, {count}}},\n" for n,i,count in clips)+"};\n")
         out.write("static const uint32_t red_offsets[] = {\n"+rows(offsets)+"\n};\n")
         out.write("static const uint32_t red_mouth[] = {\n"+rows(mouth)+"\n};\n")
-        out.write("static const uint8_t red_xmap[RED_PANEL] = {\n"+rows(screen_map(X_EDGES))+"\n};\n")
-        out.write("static const uint8_t red_ymap[RED_PANEL] = {\n"+rows(screen_map(Y_EDGES))+"\n};\n")
+        out.write("static const uint16_t red_xmap[RED_PANEL] = {\n"+rows(screen_map(X_EDGES))+"\n};\n")
+        out.write("static const uint16_t red_ymap[RED_PANEL] = {\n"+rows(screen_map(Y_EDGES))+"\n};\n")
     (dest / "stopwatch_red.h264").write_bytes(blob)
     print(f"{len(NAMES)-1} motions, {len(mouth)} frames, {len(blob)} bytes; largest packet {largest}")
 
