@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -13,11 +14,13 @@
 #include <time.h>
 
 #include "esp_attr.h"
+#include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -44,7 +47,7 @@ int __real_lwip_connect(int s, const struct sockaddr *name, socklen_t namelen);
 #define U2A_CAP 16384
 #define A2U_CAP (VMESS_FIRST_MAX + APP_READ + VMESS_CHUNK_OVERHEAD)
 #define CONNECT_TIMEOUT_US (10 * 1000000LL)
-#define DRAIN_TIMEOUT_US (30 * 1000000LL)
+#define DRAIN_TIMEOUT_US (5 * 1000000LL)
 #define TIME_VALID 1735689600   // 2025-01-01: anything earlier isn't set
 
 // ---- configuration ----
@@ -151,7 +154,17 @@ int __wrap_lwip_connect(int s, const struct sockaddr *name, socklen_t namelen) {
     uint32_t ip = ntohl(in->sin_addr.s_addr);
     if ((ip >> 16) != ((198u << 8) | 18u)) return __real_lwip_connect(s, name, namelen);
     int idx = (int)(ip & 0xffff);
-    if (idx < 1 || idx >= FAKE_N || !s_fake[idx][0]) {
+    char host_dbg[HOST_MAX] = "";
+    bool valid = false;
+    if (idx >= 1 && idx < FAKE_N) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_fake[idx][0]) {
+            strlcpy(host_dbg, s_fake[idx], sizeof(host_dbg));
+            valid = true;
+        }
+        xSemaphoreGive(s_lock);
+    }
+    if (!valid) {
         errno = EHOSTUNREACH;
         return -1;
     }
@@ -161,7 +174,7 @@ int __wrap_lwip_connect(int s, const struct sockaddr *name, socklen_t namelen) {
     socklen_t ll = sizeof(lo);
     if (lwip_bind(s, (struct sockaddr *)&lo, sizeof(lo)) != 0 ||
         lwip_getsockname(s, (struct sockaddr *)&lo, &ll) != 0) {
-        ESP_LOGW(TAG, "bind for %s failed: %d", s_fake[idx], errno);
+        ESP_LOGW(TAG, "bind for %s failed: %d", host_dbg, errno);
         errno = EHOSTUNREACH;
         return -1;
     }
@@ -257,6 +270,23 @@ static void ntp_sync(void) {
             return;
         }
     }
+}
+
+/* 独立后台低优任务执行 NTP 校时，避免最长 8 秒的阻塞超时拖慢主转发循环 */
+static void ntp_task(void *arg) {
+    (void)arg;
+    xEventGroupWaitBits(s_ev, EV_NET, pdFALSE, pdTRUE, portMAX_DELAY);
+    for (;;) {
+        ntp_sync();
+        vTaskDelay(pdMS_TO_TICKS(time_ok() ? 60000 : 5000));
+    }
+}
+
+static atomic_bool s_wifi_dropped = false;
+
+static void on_wifi_down(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    (void)arg; (void)base; (void)id; (void)data;
+    atomic_store(&s_wifi_dropped, true);
 }
 
 // ---- the node's address ----
@@ -428,6 +458,7 @@ static void sess_io(sess_t *s, fd_set *rs, fd_set *ws) {
     }
     // App -> node.
     if (s->a2u_len && FD_ISSET(s->up, ws) && !flush(s->up, s->a2u, &s->a2u_len, &s->a2u_off)) {
+        s_node_t = 0;
         sess_close(s, "node send failed");
         return;
     }
@@ -480,10 +511,16 @@ static void relay_task(void *arg) {
     }
     set_nonblock(lfd);
     for (int i = 0; i < SESS_N; i++) s_sess[i].app = s_sess[i].up = -1;
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_wifi_down, NULL);
     xEventGroupSetBits(s_ev, EV_LISTEN);
     ESP_LOGI(TAG, "relaying through the node on port %u", s_cfg.port);
     for (;;) {
-        ntp_sync();
+        if (atomic_exchange(&s_wifi_dropped, false)) {
+            s_node_t = 0;
+            for (int i = 0; i < SESS_N; i++) {
+                if (s_sess[i].st) sess_close(&s_sess[i], "wifi lost");
+            }
+        }
         fd_set rs, ws;
         FD_ZERO(&rs);
         FD_ZERO(&ws);
@@ -537,7 +574,10 @@ void vproxy_start(void) {
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         s_running = false;
         ESP_LOGE(TAG, "can't start the relay task");
+        return;
     }
+    xTaskCreatePinnedToCoreWithCaps(ntp_task, "vproxy_ntp", 4096, NULL, 2, NULL, tskNO_AFFINITY,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 // ---- console ----

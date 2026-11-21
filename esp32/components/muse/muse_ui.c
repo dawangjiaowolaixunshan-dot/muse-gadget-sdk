@@ -2713,7 +2713,12 @@ static void send_snapshot(void)
     if (!buf) {
         return;
     }
-    enum { RAW = 144 };   /* lines must fit the driver's 256-byte TX ring */
+    /* 抓屏期间临时屏蔽全局日志输出，避免日志抢占串口发送缓冲导致 SNAP 帧断裂 */
+#ifdef ESP_PLATFORM
+    esp_log_level_t prev_log = esp_log_level_get("*");
+    esp_log_level_set("*", ESP_LOG_NONE);
+#endif
+    enum { RAW = 144 };   /* lines must fit the driver's TX ring */
     char hdr[48];
     int n = snprintf(hdr, sizeof(hdr), "\nSNAP BEGIN %d %d %d\n", (int)buf->header.w, (int)buf->header.h, RAW);
     if (!muse_console_write(hdr, n)) {
@@ -2736,6 +2741,9 @@ static void send_snapshot(void)
     }
     muse_console_write("SNAP END\n", 9);
 done:
+#ifdef ESP_PLATFORM
+    esp_log_level_set("*", prev_log);
+#endif
     lv_draw_buf_destroy(buf);
 #else
     muse_console_write("\nSNAP OFF\n", 10);   /* so snap.py can say why */

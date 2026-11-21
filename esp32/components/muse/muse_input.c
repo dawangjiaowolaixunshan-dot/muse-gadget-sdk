@@ -773,13 +773,20 @@ static void input_task(void *arg)
     }
 }
 
-/* Reads the rest of a line into buf; false if it was too long (the rest is dropped). */
+/* 读取一整行串口命令；若 2 秒内未收完换行则判定为断连残行并自动丢弃，避免吞掉重连后的首条命令 */
 static bool read_line(char *buf, size_t cap)
 {
     size_t len = 0;
     bool whole = true;
     uint8_t c;
-    while (muse_console_getc(&c) && c != '\n') {
+    for (;;) {
+        if (!muse_console_getc_timeout(&c, 2000)) {
+            buf[0] = '\0';
+            return false;
+        }
+        if (c == '\n') {
+            break;
+        }
         if (c == '\r') {
             continue;
         }
@@ -1045,7 +1052,7 @@ static void serial_task(void *arg)
             char *line = heap_caps_malloc(SERIAL_LINE, MUSE_BIG_CAPS);
             char none[1];   /* no room: the line is read and dropped */
             bool whole = read_line(line ? line : none, line ? SERIAL_LINE : sizeof(none));
-            if (line && !console_command(line, whole)) {
+            if (line && line[0] && !console_command(line, whole)) {
                 muse_ble_command(line);
             }
             free(line);

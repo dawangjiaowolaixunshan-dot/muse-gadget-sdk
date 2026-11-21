@@ -23,8 +23,8 @@ class ConsoleInstall(unittest.TestCase):
                 'sdkconfig.h': f'#define CONFIG_MUSE_CONSOLE_UART {int(uart)}\n#define CONFIG_PM_LIGHT_SLEEP_CALLBACKS 0\n#define CONFIG_ESP_CONSOLE_UART_NUM 0\n'
                                f'#define CONFIG_VFS_SUPPORT_IO {int(vfs_io)}\n#define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED {int(usb_console)}\n',
                 'freertos/FreeRTOS.h': '#define portMAX_DELAY 0xffffffffu\n#define pdMS_TO_TICKS(ms) (ms)\n',
-                'driver/usb_serial_jtag.h': '''typedef struct {int rx_buffer_size;} usb_serial_jtag_driver_config_t;
-#define USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT() ((usb_serial_jtag_driver_config_t){0})
+                'driver/usb_serial_jtag.h': '''typedef struct {int rx_buffer_size; int tx_buffer_size;} usb_serial_jtag_driver_config_t;
+#define USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT() ((usb_serial_jtag_driver_config_t){0, 256})
 int usb_serial_jtag_driver_install(const usb_serial_jtag_driver_config_t *);
 int usb_serial_jtag_read_bytes(void *, unsigned, unsigned);
 int usb_serial_jtag_write_bytes(const void *, unsigned, unsigned);

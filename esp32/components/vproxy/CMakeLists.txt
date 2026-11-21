@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "vmess.c" "vproxy.c"
     INCLUDE_DIRS "."
-    REQUIRES lwip mbedtls nvs_flash esp_timer
+    REQUIRES lwip mbedtls nvs_flash esp_timer esp_event esp_wifi
 )
 
 # Every TCP connection the firmware makes resolves and connects through these

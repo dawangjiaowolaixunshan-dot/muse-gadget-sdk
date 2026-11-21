@@ -27,6 +27,8 @@ esp_err_t muse_console_install(size_t rx_buf)
 {
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     cfg.rx_buffer_size = rx_buf;
+    /* 扩大 USB Serial/JTAG 发送环形缓冲至 4096 字节，避免长 JSON 状态和抓屏块被日志饿死 */
+    cfg.tx_buffer_size = 4096;
     esp_err_t err = usb_serial_jtag_driver_install(&cfg);
 #if CONFIG_VFS_SUPPORT_IO && CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED
     /* IDF builds this VFS only for a USB Serial/JTAG console. */
@@ -42,6 +44,11 @@ esp_err_t muse_console_install(size_t rx_buf)
 bool muse_console_getc(uint8_t *c)
 {
     return usb_serial_jtag_read_bytes(c, 1, portMAX_DELAY) == 1;
+}
+
+bool muse_console_getc_timeout(uint8_t *c, uint32_t timeout_ms)
+{
+    return usb_serial_jtag_read_bytes(c, 1, pdMS_TO_TICKS(timeout_ms)) == 1;
 }
 
 /* A stalled host must not keep the UI snapshot timer holding its lock.
@@ -152,6 +159,19 @@ bool muse_console_getc(uint8_t *c)
 #if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
     if (s_held) {
         xTimerReset(s_awake_timer, 0);   /* awake while the line comes in */
+    }
+#endif
+    return true;
+}
+
+bool muse_console_getc_timeout(uint8_t *c, uint32_t timeout_ms)
+{
+    if (uart_read_bytes(PORT, c, 1, pdMS_TO_TICKS(timeout_ms)) != 1) {
+        return false;
+    }
+#if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+    if (s_held) {
+        xTimerReset(s_awake_timer, 0);
     }
 #endif
     return true;

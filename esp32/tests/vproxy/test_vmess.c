@@ -67,6 +67,19 @@ int main(int argc, char **argv) {
         if (r == 1) { printf("truncated\n"); return 1; }
     }
     printf("resp_plain %s (%s)\n", got, off == n ? "all consumed" : "left over");
+    // 验证 16 位分块计数器逼近上限时主动终止流，杜绝 AES-GCM Nonce 回绕重用
+    s.tx_count = 65000;
+    if (vmess_seal(&s, (const uint8_t *)"x", 1, ch, sizeof(ch), &cl) == 0) {
+        printf("tx_count limit failed\n");
+        return 1;
+    }
+    s.rx_state = 2;
+    s.rx_count = 65000;
+    size_t u2 = 0, ol2 = 0;
+    if (vmess_open(&s, resp, 0, &u2, out, sizeof(out), &ol2) != 2) {
+        printf("rx_count limit failed\n");
+        return 1;
+    }
     vmess_end(&s);
     return strcmp(got, "world") != 0 || off != n;
 }

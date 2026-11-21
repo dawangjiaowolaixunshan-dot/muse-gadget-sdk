@@ -196,8 +196,12 @@ int vmess_begin(vmess_sess_t *s, const uint8_t ck[16], const char *host, uint16_
     return 0;
 }
 
+/* 16 位分块计数器接近上限时提前结束流，由上层平滑重连，杜绝 AES-GCM Nonce 回绕重用 */
+#define VMESS_MAX_CHUNKS 65000u
+
 int vmess_seal(vmess_sess_t *s, const uint8_t *in, size_t n, uint8_t *out, size_t cap,
                size_t *out_len) {
+    if (s->tx_count >= VMESS_MAX_CHUNKS) return PSA_ERROR_CORRUPTION_DETECTED;
     if (n > VMESS_CHUNK_PLAIN_MAX || cap < n + VMESS_CHUNK_OVERHEAD) return PSA_ERROR_BUFFER_TOO_SMALL;
     uint8_t nonce[12];
     size_t ol;
@@ -238,6 +242,10 @@ int vmess_open(vmess_sess_t *s, const uint8_t *in, size_t len, size_t *used, uin
         *used = s->rx_hdr_len + 16u;
         return 0;
     case 2: {
+        if (s->rx_count >= VMESS_MAX_CHUNKS) {
+            s->rx_state = 3;
+            return 2;
+        }
         if (len < 2) return 1;
         size_t l = (size_t)((in[0] << 8) | in[1]);
         if (l < 16 || l - 16 > cap) return PSA_ERROR_INVALID_SIGNATURE;
