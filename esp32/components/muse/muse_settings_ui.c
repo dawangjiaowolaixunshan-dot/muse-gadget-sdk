@@ -159,7 +159,7 @@ static lv_obj_t *s_text_back;
 /* ---------- building blocks ---------- */
 
 /* Network and phone names can have characters the fonts lack (muse_text.h). */
-#define SHOWN_MAX 96
+#define SHOWN_MAX 192
 
 static bool wide_layout(void)
 {
@@ -1172,7 +1172,7 @@ static void tick_hatch(void)
     if (h.detail[0]) {
     snprintf(buf, sizeof(buf), "%s\n%s", SETTINGS_STATE(muse_hatch_state_name(h.state)), SETTINGS_STATE(h.detail));
     } else {
-        strlcpy(buf, muse_hatch_state_name(h.state), sizeof(buf));
+        strlcpy(buf, SETTINGS_STATE(muse_hatch_state_name(h.state)), sizeof(buf));
     }
     set_text(s_hatch_status, buf);
     lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :

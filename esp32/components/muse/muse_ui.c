@@ -1609,6 +1609,11 @@ static const char *portrait_state(muse_mode_t mode, muse_voice_view_t call)
     return !p.usb && p.battery_pct >= 0 && p.battery_pct <= 15 ? "电量低" : "我在";
 }
 
+static bool caption_is(const char *caption, const char *en)
+{
+    return !strcmp(caption, en) || !strcmp(caption, muse_lang_message(en));
+}
+
 static void update_portrait(muse_mode_t mode, float now)
 {
     static char caption[MUSE_CAPTION_MAX];
@@ -1617,12 +1622,12 @@ static void update_portrait(muse_mode_t mode, float now)
     static int last_lit = -1;
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
     if (fresh) {
-        bool no_reply = !strcmp(caption, "MUSE DIDN'T ANSWER");
-        bool unreachable = !strcmp(caption, muse_lang_message("CAN'T REACH MUSE"));
-        bool failed = !strcmp(caption, muse_lang_message("CALL FAILED")) ||
-                      !strcmp(caption, muse_lang_message("LOST CONNECTION TO MUSE")) ||
-                      !strcmp(caption, muse_lang_message("MUSE DIDN'T TAKE THE CALL")) || no_reply;
-        bool reconnecting = !strcmp(caption, muse_lang_message("RECONNECTING - KEEP HOLDING"));
+        bool no_reply = caption_is(caption, "MUSE DIDN'T ANSWER");
+        bool unreachable = caption_is(caption, "CAN'T REACH MUSE");
+        bool failed = caption_is(caption, "CALL FAILED") ||
+                      caption_is(caption, "LOST CONNECTION TO MUSE") ||
+                      caption_is(caption, "MUSE DIDN'T TAKE THE CALL") || no_reply;
+        bool reconnecting = caption_is(caption, "RECONNECTING - KEEP HOLDING");
         notice = reconnecting || no_reply ? "按住黄键" : unreachable ? "连接遇到问题" : "通话已断开";
         problem_until = now + (reconnecting ? 8.0f : (failed || unreachable) ? 4.0f : 0);
     }
@@ -1639,10 +1644,10 @@ static void update_portrait(muse_mode_t mode, float now)
     if (mode == MUSE_MODE_IDLE && call == MUSE_VOICE_VIEW_NONE && now < problem_until) text = notice;
     bool ready = call == MUSE_VOICE_VIEW_NONE || call == MUSE_VOICE_VIEW_READY;
     bool hint = ready && mode == MUSE_MODE_IDLE && muse_state_hint_pending();
-    if (hint && !strcmp(caption, "SPEAKER OFF")) {
+    if (hint && caption_is(caption, "SPEAKER OFF")) {
         text = "已静音";
         hint = false;
-    } else if (hint && !strcmp(caption, "SPEAKER ON")) {
+    } else if (hint && caption_is(caption, "SPEAKER ON")) {
         text = "声音已开启";
         hint = false;
     }

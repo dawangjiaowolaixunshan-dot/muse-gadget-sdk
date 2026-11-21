@@ -117,6 +117,20 @@ class LangTest(unittest.TestCase):
                 self.assertFalse({c for c in text if ord(c) > 127 and ord(c) not in glyphs}, text)
         chinese = {c for c in settings if 0x2e80 <= ord(c) <= 0xffef}
         self.assertFalse({c for c in chinese if ord(c) not in glyphs})
+        zh_messages = dict(language["ZH_MESSAGES"])
+        zh_menu = dict(language["ZH_MENU"])
+        for en in (
+            "CALL ENDED",
+            "MUSE ENDED THE CALL",
+            "MUSE DIDN'T TAKE THE CALL",
+            "CALL FAILED",
+            "MUSE DIDN'T ANSWER",
+            "CALL ENDED: ALL QUIET",
+            "CALL TIME LIMIT",
+        ):
+            self.assertIn(en, zh_messages)
+        for en in ("Saved", "Can't connect"):
+            self.assertIn(en, zh_menu)
 
 
 if __name__ == "__main__":

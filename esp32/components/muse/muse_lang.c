@@ -289,6 +289,13 @@ static const muse_lang_entry_t ZH_MESSAGES[] = {
     { "MIC BUFFER FULL - RELEASE AND RETRY", "录音缓冲已满，松开重试" },
     { "HANGING UP...", "正在挂断" },
     { "CONNECTING TO MUSE...", "正在连接 Muse" },
+    { "CALL ENDED", "通话已结束" },
+    { "MUSE ENDED THE CALL", "对方已挂断" },
+    { "MUSE DIDN'T TAKE THE CALL", "未接通" },
+    { "CALL FAILED", "通话失败" },
+    { "MUSE DIDN'T ANSWER", "无人应答" },
+    { "CALL ENDED: ALL QUIET", "长时间无声音，已挂断" },
+    { "CALL TIME LIMIT", "已达通话时长上限" },
 };
 
 static const muse_lang_entry_t ZH_MENU[] = {
