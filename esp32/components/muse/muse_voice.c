@@ -1073,6 +1073,9 @@ typedef struct {
     uint32_t input_epoch;
     int64_t give_up, release_until;
     size_t release_frames;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
+    uint8_t mute_head_chunks;
+#endif
     muse_input_event_t pending_ev;
     muse_vc_gate_t gate;
 } call_ui_t;
@@ -1119,6 +1122,9 @@ static void call_input(call_ui_t *c)
             finish_release(c);   /* old press closes before the new one opens */
             ++c->press;
             c->held = true;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
+            c->mute_head_chunks = 2;
+#endif
             muse_voice_call_set_talking(true);
             muse_vc_gate_init(&c->gate, false, 0);
             c->awaiting = false;
@@ -1126,12 +1132,17 @@ static void call_input(call_ui_t *c)
             c->held = false;
             muse_state_set_level(0);
             call_view(c->live ? MUSE_VOICE_VIEW_THINKING : MUSE_VOICE_VIEW_CONNECTING);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
+            /* 松键立即停录，避免微动开关回弹咔哒声混入尾部被云端当成第二次说话 */
+            muse_voice_call_set_talking(false);
+#else
             if (c->server_hold) {
                 muse_voice_call_set_talking(false);
             } else {
                 c->release_until = esp_timer_get_time() + CALL_RELEASE_US;
                 c->release_frames = TAIL_FRAMES;
             }
+#endif
         }
     }
     if (atomic_load(&s_shutdown) || c->input_epoch != muse_input_call_epoch()) c->hung_up = true;
@@ -1166,6 +1177,9 @@ static void run_call(bool ptt, size_t waking_chunks)
     static const int16_t silence[MUSE_AUDIO_CHUNK];
     char text[96] = "";
     call_ui_t c = { .ptt = ptt, .held = ptt, .input_epoch = s_press_input_epoch };
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
+    if (ptt && !waking_chunks) c.mute_head_chunks = 2;
+#endif
     muse_vc_gate_init(&c.gate, false, ptt ? 0 : CALL_TAIL_US);
     bool ended = false;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
@@ -1248,6 +1262,12 @@ static void run_call(bool ptt, size_t waking_chunks)
                    !aec &&
 #endif
                    muse_vc_gate_mic_open(&c.gate, now);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
+        if (ptt && mic && c.mute_head_chunks) {
+            c.mute_head_chunks--;
+            memset(s_chunk, 0, MUSE_AUDIO_CHUNK * sizeof(int16_t));
+        }
+#endif
         if (mic) mic = muse_voice_call_audio(s_chunk, MUSE_AUDIO_CHUNK);
         if (ptt && mic) {
             c.awaiting = true;
@@ -1332,7 +1352,11 @@ static void run_call(bool ptt, size_t waking_chunks)
             !ptt ? (muse_voice_call_working() ? MUSE_VOICE_VIEW_WORKING : MUSE_VOICE_VIEW_LISTENING) :
             c.release_until || c.awaiting || status.sending ? MUSE_VOICE_VIEW_THINKING :
             status.working ? MUSE_VOICE_VIEW_WORKING : MUSE_VOICE_VIEW_READY;
-        if (ptt && view == MUSE_VOICE_VIEW_READY && muse_voice_call_view() != view) {
+        if (ptt && view == MUSE_VOICE_VIEW_READY && muse_voice_call_view() != view
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
+            && !muse_state_hint_pending()
+#endif
+        ) {
             muse_state_set_caption("HOLD YELLOW TO TALK");
         }
         /* level also animates the mouth; only LISTENING displays the meter.

@@ -1650,6 +1650,9 @@ static void update_portrait(muse_mode_t mode, float now)
     } else if (hint && caption_is(caption, "SPEAKER ON")) {
         text = "声音已开启";
         hint = false;
+    } else if (hint && caption_is(caption, "HOLD LONGER TO TALK")) {
+        text = "请再试一试";
+        hint = false;
     }
     bool listen = call == MUSE_VOICE_VIEW_LISTENING || (call == MUSE_VOICE_VIEW_NONE && mode == MUSE_MODE_LISTENING);
     bool speak = call == MUSE_VOICE_VIEW_SPEAKING || (call == MUSE_VOICE_VIEW_NONE && mode == MUSE_MODE_SPEAKING);

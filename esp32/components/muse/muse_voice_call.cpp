@@ -75,6 +75,11 @@
 #include "muse_voice_call_priv.h"
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
 #include "muse_watch_dialogue.h"
+#ifdef ESP_PLATFORM
+extern "C" {
+#include "muse_state.h"
+}
+#endif
 #endif
 
 static const char *TAG = "muse_call";
@@ -239,10 +244,24 @@ static constexpr int64_t WATCH_NO_TURN_TIMEOUT_US = 6500000;
 static int64_t s_watch_reply_deadline;
 static int64_t s_watch_turn_deadline;
 static bool s_watch_waiting_after_release;
+static uint32_t s_press_samples;
 // Counts only. Keep the mic samples and transcript out of the console log.
 static struct {
     unsigned mic_samples, mic_peak, sent, turns, replies, suppressed, incoming_audio, rejected_audio;
 } s_live_trace;
+
+static void soft_limit_mic(int16_t *pcm, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        int v = pcm[i];
+        int a = v < 0 ? -v : v;
+        if (a > 18000) {
+            a = 18000 + (a - 18000) / 3;
+            if (a > 27500) a = 27500;
+            pcm[i] = static_cast<int16_t>(v < 0 ? -a : a);
+        }
+    }
+}
 #endif
 
 static int64_t now_us(void)
@@ -745,6 +764,8 @@ static void ptt_pressed(uint32_t press)
     s_watch_reply_deadline = 0;
     s_watch_turn_deadline = 0;
     s_watch_waiting_after_release = false;
+    s_live_trace.mic_peak = 0;
+    s_press_samples = 0;
 #endif
     muse_vc_resampler_init(&s_down, MUSE_VC_WIRE_RATE, MUSE_VC_MIC_RATE);   /* no edge carried from the old reply */
     s_st &= ~(ST_REPLY_AUDIO | ST_REPLY_DONE | ST_REPLY_LOST | ST_HEARD);
@@ -1006,6 +1027,9 @@ static void on_line(void *ctx, const char *line, size_t len)
             s_watch_reply_deadline = 0;
             s_watch_turn_deadline = 0;
             s_watch_waiting_after_release = false;
+#ifdef ESP_PLATFORM
+            muse_state_set_hint("HOLD LONGER TO TALK");
+#endif
 #endif
         }
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
@@ -1075,6 +1099,22 @@ static bool pump_ptt(int64_t now)
         if (s_mic_off == s_mic_len) {
             s_mic_len = mic_take();
             s_mic_off = 0;
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            if (s_mic_len) {
+                soft_limit_mic(s_mic, s_mic_len);
+                s_press_samples += static_cast<uint32_t>(s_mic_len);
+                if (!s_talk && xStreamBufferBytesAvailable(s_in) == 0 && s_press_samples > 6400) {
+                    /* 松键收尾末块线性淡出至零，抹平微动开关壳体回弹杂音 */
+                    size_t fade_n = s_mic_len < 960 ? s_mic_len : 960;
+                    size_t start = s_mic_len - fade_n;
+                    for (size_t k = 0; k < fade_n; k++) {
+                        s_mic[start + k] = static_cast<int16_t>(
+                            static_cast<int32_t>(s_mic[start + k]) * static_cast<int32_t>(fade_n - 1 - k) /
+                            static_cast<int32_t>(fade_n));
+                    }
+                }
+            }
+#endif
         }
         size_t len, used;
         if (s_mic_off < s_mic_len) {
@@ -1234,8 +1274,13 @@ bool muse_voice_call_init(void)
     static const muse_vc_limits_t limits = {
         .open_us = 30 * 1000000LL,      /* the ingress waits up to 120 s for a head; we don't */
         .ready_us = 40 * 1000000LL,     /* the server gives up on its backend after 25 s */
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        .idle_us = 180 * 1000000LL,     /* 3 分钟空闲不断线 */
+        .max_us = 900 * 1000000LL,      /* 15 分钟通话上限 */
+#else
         .idle_us = CONFIG_MUSE_REALTIME_VOICE_IDLE_S * 1000000LL,
         .max_us = CONFIG_MUSE_REALTIME_VOICE_MAX_S * 1000000LL,
+#endif
         .end_call_us = 10 * 1000000LL,
         .drain_us = 5 * 1000000LL,
     };
