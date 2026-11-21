@@ -235,11 +235,13 @@ static bool s_wall_known;
 static uint32_t s_bad_lines, s_bad_audio, s_dropped_audio, s_frames_out;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
 static constexpr int64_t WATCH_REPLY_TIMEOUT_US = 22000000;
+static constexpr int64_t WATCH_NO_TURN_TIMEOUT_US = 6500000;
 static int64_t s_watch_reply_deadline;
+static int64_t s_watch_turn_deadline;
 static bool s_watch_waiting_after_release;
 // Counts only. Keep the mic samples and transcript out of the console log.
 static struct {
-    unsigned mic_samples, mic_peak, sent, turns, replies, incoming_audio, rejected_audio;
+    unsigned mic_samples, mic_peak, sent, turns, replies, suppressed, incoming_audio, rejected_audio;
 } s_live_trace;
 #endif
 
@@ -499,10 +501,10 @@ static bool run(uint32_t acts, bool allow_stop_drain = true)
                  (unsigned)s_lines.skipped);
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
         if (s_ptt) {
-            ESP_LOGI(TAG, "live counts: mic_samples=%u mic_peak=%u sent=%u turns=%u replies=%u incoming=%u gate_drop=%u",
+            ESP_LOGI(TAG, "live counts: mic_samples=%u mic_peak=%u sent=%u turns=%u replies=%u suppressed=%u incoming=%u gate_drop=%u",
                      s_live_trace.mic_samples, s_live_trace.mic_peak, s_live_trace.sent,
-                     s_live_trace.turns, s_live_trace.replies, s_live_trace.incoming_audio,
-                     s_live_trace.rejected_audio);
+                     s_live_trace.turns, s_live_trace.replies, s_live_trace.suppressed,
+                     s_live_trace.incoming_audio, s_live_trace.rejected_audio);
         }
 #endif
         s_media_id = s_end_id = 0;
@@ -690,6 +692,7 @@ static void reply_lost(void)
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
     muse_watch_dialogue_stop(s_press);
     s_watch_reply_deadline = 0;
+    s_watch_turn_deadline = 0;
     s_watch_waiting_after_release = false;
 #endif
 }
@@ -740,6 +743,7 @@ static void ptt_pressed(uint32_t press)
     s_reply[0] = '\0';   /* the old reply's caption is done too */
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
     s_watch_reply_deadline = 0;
+    s_watch_turn_deadline = 0;
     s_watch_waiting_after_release = false;
 #endif
     muse_vc_resampler_init(&s_down, MUSE_VC_WIRE_RATE, MUSE_VC_MIC_RATE);   /* no edge carried from the old reply */
@@ -909,6 +913,7 @@ static void on_line(void *ctx, const char *line, size_t len)
     if (ev.kind == MUSE_VC_EV_AUDIO) s_live_trace.incoming_audio++;
     if (ev.kind == MUSE_VC_EV_TURN_STARTED) s_live_trace.turns++;
     if (ev.kind == MUSE_VC_EV_RESPONSE_CREATED) s_live_trace.replies++;
+    if (ev.kind == MUSE_VC_EV_INPUT_SUPPRESSED) s_live_trace.suppressed++;
 #endif
     if (ev.kind == MUSE_VC_EV_AUDIO) {
         play(ev, now);
@@ -993,11 +998,37 @@ static void on_line(void *ctx, const char *line, size_t len)
         }
         if (ev.kind == MUSE_VC_EV_SPEECH_STARTED) {
             s_st |= ST_HEARD;
+        } else if (ev.kind == MUSE_VC_EV_INPUT_SUPPRESSED && !s_gate->item[0]) {
+            /* 云端判定本段输入被过滤不会发起轮次，立即清除等待标记回到就绪态 */
+            s_st &= ~(ST_HEARD | ST_REPLY_AUDIO | ST_REPLY_DONE);
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+            muse_watch_dialogue_stop(s_press);
+            s_watch_reply_deadline = 0;
+            s_watch_turn_deadline = 0;
+            s_watch_waiting_after_release = false;
+#endif
         }
+#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
+        if (ev.kind == MUSE_VC_EV_TURN_STARTED && s_gate->confirmed) {
+            s_watch_turn_deadline = 0;
+        }
+        if (ev.kind == MUSE_VC_EV_SPEECH_STARTED || ev.kind == MUSE_VC_EV_SPEECH_STOPPED ||
+            ev.kind == MUSE_VC_EV_INPUT_SUPPRESSED || ev.kind == MUSE_VC_EV_TURN_STARTED ||
+            ev.kind == MUSE_VC_EV_TURN_SETTLED || ev.kind == MUSE_VC_EV_RESPONSE_CREATED) {
+            const char *ename = ev.kind == MUSE_VC_EV_SPEECH_STARTED ? "speech_started" :
+                                ev.kind == MUSE_VC_EV_SPEECH_STOPPED ? "speech_stopped" :
+                                ev.kind == MUSE_VC_EV_INPUT_SUPPRESSED ? "input_suppressed" :
+                                ev.kind == MUSE_VC_EV_TURN_STARTED ? "turn_started" :
+                                ev.kind == MUSE_VC_EV_TURN_SETTLED ? "turn_settled" : "response_created";
+            ESP_LOGI(TAG, "watch ev: %s item=%d confirmed=%d playing=%d",
+                     ename, s_gate->item[0] != '\0', s_gate->confirmed, muse_vc_reply_gate_playing(s_gate));
+        }
+#endif
         if (muse_vc_reply_gate_done(s_gate, &ev)) {
             s_st |= ST_REPLY_DONE;   /* this reply's own turn or response, never an older one's */
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
             s_watch_reply_deadline = 0;
+            s_watch_turn_deadline = 0;
             s_watch_waiting_after_release = false;
 #endif
         }
@@ -1178,6 +1209,7 @@ static bool begin_call(uint32_t gen)
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
     s_live_trace = {};
     s_watch_reply_deadline = 0;
+    s_watch_turn_deadline = 0;
 #endif
     char path[96];
     snprintf(path, sizeof(path), "/voice/realtime?call_id=%s", id);
@@ -1291,14 +1323,30 @@ bool muse_voice_call_poll(void)
     if (s_ptt && s_call.state == MUSE_VC_LIVE && s_watch_waiting_after_release && !s_talk) {
         s_watch_waiting_after_release = false;
         s_watch_reply_deadline = now + WATCH_REPLY_TIMEOUT_US;
+        s_watch_turn_deadline = s_gate->confirmed ? 0 : now + WATCH_NO_TURN_TIMEOUT_US;
         ESP_LOGI(TAG, "watch live: release mic_samples=%u mic_peak=%u sent=%u",
                  s_live_trace.mic_samples, s_live_trace.mic_peak, s_live_trace.sent);
     }
+    if (s_ptt && s_call.state == MUSE_VC_LIVE && s_watch_turn_deadline && now >= s_watch_turn_deadline) {
+        s_watch_turn_deadline = 0;
+        if (!s_talk && !s_gate->confirmed && !muse_vc_reply_gate_playing(s_gate)) {
+            /* 松手后 6.5 秒云端仍未开启有效轮次：重置回「按住黄键说话」并保持通话在线，无需重拨 */
+            s_watch_reply_deadline = 0;
+            muse_vc_reply_gate_press(s_gate);
+            defer_clear();
+            s_st &= ~(ST_HEARD | ST_REPLY_AUDIO | ST_REPLY_DONE);
+            muse_watch_dialogue_stop(s_press);
+            ESP_LOGW(TAG, "watch live: no turn after release, back to ready (turns=%u replies=%u suppressed=%u)",
+                     s_live_trace.turns, s_live_trace.replies, s_live_trace.suppressed);
+        }
+    }
     if (s_ptt && s_call.state == MUSE_VC_LIVE && s_watch_reply_deadline && now >= s_watch_reply_deadline) {
         s_watch_reply_deadline = 0;
+        s_watch_turn_deadline = 0;
         muse_watch_dialogue_stop(s_press);
-        ESP_LOGW(TAG, "watch live: reply timed out, turns=%u replies=%u incoming=%u gate_drop=%u",
-                 s_live_trace.turns, s_live_trace.replies, s_live_trace.incoming_audio, s_live_trace.rejected_audio);
+        ESP_LOGW(TAG, "watch live: reply timed out, turns=%u replies=%u suppressed=%u incoming=%u gate_drop=%u",
+                 s_live_trace.turns, s_live_trace.replies, s_live_trace.suppressed,
+                 s_live_trace.incoming_audio, s_live_trace.rejected_audio);
         take(muse_vc_call_hang_up(&s_call, MUSE_VC_END_NO_ANSWER, now));
     }
 #endif
