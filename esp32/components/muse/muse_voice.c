@@ -1332,11 +1332,7 @@ static void run_call(bool ptt, size_t waking_chunks)
             !ptt ? (muse_voice_call_working() ? MUSE_VOICE_VIEW_WORKING : MUSE_VOICE_VIEW_LISTENING) :
             c.release_until || c.awaiting || status.sending ? MUSE_VOICE_VIEW_THINKING :
             status.working ? MUSE_VOICE_VIEW_WORKING : MUSE_VOICE_VIEW_READY;
-        if (ptt && view == MUSE_VOICE_VIEW_READY && muse_voice_call_view() != view
-#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && defined(ESP_PLATFORM)
-            && !muse_state_hint_pending()
-#endif
-        ) {
+        if (ptt && view == MUSE_VOICE_VIEW_READY && muse_voice_call_view() != view) {
             muse_state_set_caption("HOLD YELLOW TO TALK");
         }
         /* level also animates the mouth; only LISTENING displays the meter.
