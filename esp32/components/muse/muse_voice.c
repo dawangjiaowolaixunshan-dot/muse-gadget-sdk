@@ -1062,17 +1062,18 @@ static bool can_record(void)
 /* Calls: how far the speaker runs behind a write, and how long the mic stays
  * shut after Muse's voice stops (these boards have no echo cancellation). */
 #define CALL_SPEAKER_LAG_US 120000
-#define WATCH_REPLY_GAP_US 420000
+#define WATCH_REPLY_GAP_US 650000
 #define CALL_TAIL_US 300000
 #define CALL_END_WAIT_US (20LL * 1000000)   /* hung up: wait this long for the call to wind down */
 #define CALL_RELEASE_US 120000            /* bounded capture lag, as for voice notes */
 
 typedef struct {
-    bool ptt, held, live, hung_up, server_hold, awaiting;
+    bool ptt, held, live, hung_up, ending, server_hold, awaiting, pending_down;
     unsigned press;
     uint32_t input_epoch;
     int64_t give_up, release_until;
     size_t release_frames;
+    muse_input_event_t pending_ev;
     muse_vc_gate_t gate;
 } call_ui_t;
 
@@ -1094,9 +1095,24 @@ static void call_input(call_ui_t *c)
     if (c->input_epoch != muse_input_call_epoch()) c->hung_up = true;
     while (xQueueReceive(s_queue, &ev, 0) == pdTRUE) {
         muse_state_poke();
+        /* 挂断挥手或底层已进入收尾阶段时，保留按住未松开的新黄键请求，退出旧通话后无缝衔接 */
+        if (c->hung_up || c->ending) {
+            if (c->ptt && ev.type == MUSE_PTT_DOWN && ev.epoch == muse_input_call_epoch()) {
+                if (c->pending_down) muse_input_clear_call_pending(c->pending_ev.mark);
+                c->pending_down = true;
+                c->pending_ev = ev;
+            } else {
+                muse_input_clear_call_pending(ev.mark);
+                if (c->pending_down && (ev.type == MUSE_PTT_UP || ev.type == MUSE_PTT_END_CALL ||
+                    ev.epoch != c->pending_ev.epoch)) {
+                    muse_input_clear_call_pending(c->pending_ev.mark);
+                    c->pending_down = false;
+                }
+            }
+            continue;
+        }
         muse_input_clear_call_pending(ev.mark);   /* in the call now, or dropped */
         if (ev.epoch != c->input_epoch) continue;
-        if (c->hung_up) continue;
         if (ev.type == MUSE_PTT_END_CALL || (!c->ptt && ev.type == MUSE_PTT_DOWN)) {
             c->hung_up = true;
         } else if (c->ptt && ev.type == MUSE_PTT_DOWN) {
@@ -1221,6 +1237,7 @@ static void run_call(bool ptt, size_t waking_chunks)
         if (ptt) {
             muse_voice_call_ptt_status(&status);
             c.live = status.live;
+            c.ending = status.ending;
             c.server_hold = status.hold;
             if (c.server_hold || (c.release_until && esp_timer_get_time() >= c.release_until)) finish_release(&c);
         }
@@ -1298,16 +1315,16 @@ static void run_call(bool ptt, size_t waking_chunks)
         } else if (n && speaking) {
             reply_view_until = now + WATCH_REPLY_GAP_US;
         }
-        /* A short pause in an open reply should close the mouth without
-         * restarting the answer gesture. A press still wins immediately. */
-        if (ptt && status.reply_open && !status.reply_done && now < reply_view_until) {
+        /* 句间换气或服务端已发 reply_done 但本地缓冲仍在播尾音时，保持回答显示防抖，
+         * 避免画面与底部字幕跳回「想一想」；用户再次按黄键时仍立即打断。 */
+        if (ptt && (status.reply_open || status.reply_done) && now < reply_view_until) {
             speaking = true;
         }
 #endif
         if (ptt && !c.held && !status.sending &&
             ((!status.heard && !status.reply_open) || (status.reply_done && !speaking))) c.awaiting = false;
         if (ptt && (status.heard || status.reply_open) && !status.reply_done) c.awaiting = true;
-        muse_voice_view_t view = c.hung_up ? MUSE_VOICE_VIEW_ENDING :
+        muse_voice_view_t view = (c.hung_up || c.ending) ? MUSE_VOICE_VIEW_ENDING :
             !c.live ? MUSE_VOICE_VIEW_CONNECTING :
             c.server_hold ? MUSE_VOICE_VIEW_THINKING :
             ptt && c.held ? (mic ? MUSE_VOICE_VIEW_LISTENING : MUSE_VOICE_VIEW_THINKING) :
@@ -1368,6 +1385,14 @@ static void run_call(bool ptt, size_t waking_chunks)
     if (!atomic_load(&s_shutdown)) go_idle(ended && text[0] ? text : "CALL ENDED");
     atomic_store(&s_call_view, MUSE_VOICE_VIEW_NONE);
     atomic_store(&s_ptt_call, false);
+    if (c.pending_down) {
+        if (!atomic_load(&s_shutdown) && c.pending_ev.epoch == muse_input_call_epoch() &&
+            xQueueSendToFront(s_queue, &c.pending_ev, 0) == pdTRUE) {
+            /* 保留挂起请求，交由 voice_task 下一轮立即发起新通话 */
+        } else {
+            muse_input_clear_call_pending(c.pending_ev.mark);
+        }
+    }
 }
 #endif
 

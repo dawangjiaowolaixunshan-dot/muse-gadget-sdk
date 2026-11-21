@@ -121,6 +121,7 @@ typedef struct {
     bool overflow;     /* audio was dropped during the last hold: the start buffer was full */
     bool reply_lost;   /* a reply was dropped: too much of it came before Muse confirmed the turn */
     bool working;      /* Muse still has work open: a turn not yet settled, or delegated work */
+    bool ending;       /* 底层通话已进入收尾结束阶段（等待对端确认或超时关闭） */
 } muse_voice_call_ptt_status_t;
 
 void muse_voice_call_ptt_status(muse_voice_call_ptt_status_t *out);

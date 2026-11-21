@@ -281,6 +281,10 @@ muse_voice_call_ev_t muse_voice_call_event(char *p,size_t n) {
     if (scenario>=12 && scenario<=14 && frame==4 && !ended_event) {
         ended_event=true; snprintf(p,n,"CALL ENDED"); return MUSE_VOICE_CALL_EV_ENDED;
     }
+    if ((scenario==48 || scenario==49) && !ended_event) {
+        if (frame>=5) { ended_event=true; snprintf(p,n,"CALL ENDED"); return MUSE_VOICE_CALL_EV_ENDED; }
+        return MUSE_VOICE_CALL_EV_NONE;
+    }
     if (!ended_event && ((need_end && scenario!=7) || (frame>=(scenario==1?22:16) && scenario!=7) || (scenario==3 && frame==2))) {
         ended_event=true; snprintf(p,n,"CALL ENDED"); return MUSE_VOICE_CALL_EV_ENDED;
     }
@@ -399,6 +403,11 @@ esp_err_t muse_audio_read(int16_t *p,size_t n) {
     else if(scenario==7 && frame==2) { push(MUSE_PTT_END_CALL); clock_us+=20000000; }
     else if(scenario>=12 && scenario<=14 && frame==3) push(MUSE_PTT_UP);
     else if(scenario==18 && frame==4) push(MUSE_PTT_UP);
+    else if(scenario==48 || scenario==49) {
+        if(frame==2) push(MUSE_PTT_END_CALL);
+        if(frame==3) push(MUSE_PTT_DOWN);
+        if(scenario==49 && frame==4) push(MUSE_PTT_UP);
+    }
     if(scenario==19) fail_read=frame==3;
     for(size_t i=0;i<n;i++) p[i]=(int16_t)(100+frame);
     return fail_read?ESP_FAIL:ESP_OK;
@@ -837,6 +846,12 @@ int main(int argc,char **argv) {
             assert(xQueuePeek(s_queue,&next,0) && next.type==MUSE_PTT_DOWN);
         }
         assert(!ends && mic_at[3] && !mic_at[4]);
+    } else if(scenario==48) {
+        muse_input_event_t next;
+        assert(ends==1 && xQueuePeek(s_queue,&next,0) && next.type==MUSE_PTT_DOWN);
+    } else if(scenario==49) {
+        muse_input_event_t next;
+        assert(ends==1 && !xQueuePeek(s_queue,&next,0));
     }
     if(scenario==15) {
         frame=0; ready_event=ended_event=false;

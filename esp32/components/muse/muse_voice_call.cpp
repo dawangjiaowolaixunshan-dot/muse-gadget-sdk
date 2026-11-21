@@ -131,6 +131,7 @@ enum : uint32_t {
     ST_ENDED = 1u << 8,
     ST_HEARD = 1u << 9,
     ST_WORKING = 1u << 10,
+    ST_ENDING = 1u << 11,
 };
 
 struct call_ev_t {
@@ -683,6 +684,8 @@ static void reply_lost(void)
     ESP_LOGW(TAG, "reply dropped: too much audio before it could play");
     muse_vc_reply_gate_press(s_gate);
     defer_clear();
+    /* 同步清除已听到与回答标记，避免界面因 ST_HEARD 残留而死卡在「想一想」 */
+    s_st &= ~(ST_HEARD | ST_REPLY_AUDIO | ST_REPLY_DONE);
     s_st |= ST_REPLY_LOST;
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
     muse_watch_dialogue_stop(s_press);
@@ -759,6 +762,8 @@ static void publish(void)
         bool connecting = s_pending_gen || s_call.state == MUSE_VC_OPENING || s_call.state == MUSE_VC_CONNECTING;
         if (connecting) {
             st |= ST_CONNECTING;
+        } else if (s_call.state == MUSE_VC_ENDING) {
+            st |= ST_ENDING;
         } else if (s_call.state == MUSE_VC_LIVE) {
             st |= ST_LIVE;
             if (s_call.held) {
@@ -1698,4 +1703,5 @@ extern "C" void muse_voice_call_ptt_status(muse_voice_call_ptt_status_t *out)
     out->overflow = v_overflow;
     out->reply_lost = st & ST_REPLY_LOST;
     out->working = st & ST_WORKING;
+    out->ending = st & ST_ENDING;
 }

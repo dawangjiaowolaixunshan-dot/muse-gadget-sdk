@@ -64,6 +64,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -302,6 +303,17 @@ struct pending_t {
 /* 10 KB, most of it the MP3 decoder: in PSRAM on boards that let static data go
  * there (the AIPI), so Wi-Fi setup and TLS have the internal RAM. */
 EXT_RAM_BSS_ATTR static turn_t s_turn;
+/* 保护 s_turn 消息表与字幕文本，消除 0 号核写入/清零与 1 号核读取的跨核数据竞争 */
+#ifdef ESP_PLATFORM
+static StaticSemaphore_t s_turn_mu_buf;
+#endif
+static SemaphoreHandle_t s_turn_mu;
+
+struct turn_lock_t {
+    bool held;
+    turn_lock_t() : held(s_turn_mu && xSemaphoreTake(s_turn_mu, portMAX_DELAY) == pdTRUE) {}
+    ~turn_lock_t() { if (held) xSemaphoreGive(s_turn_mu); }
+};
 EXT_RAM_BSS_ATTR static pending_t s_pending;
 static std::atomic<bool> s_incoming{false};   /* a reply is held: muse_hatch_incoming() */
 static std::atomic<bool> s_incoming_used{false};   /* a voice task plays them (the Voice PE's doesn't) */
@@ -1062,19 +1074,22 @@ static bool turn_start(uint32_t gen, bool text)
             turn_finish();
         }
     }
-    uint8_t *chunk = s_turn.chunk, *mp3 = s_turn.mp3, *note = s_turn.note;
-    char *texts = s_turn.texts;
-    s_turn = turn_t{};
-    s_turn.chunk = chunk;
-    s_turn.mp3 = mp3;
-    s_turn.note = note;
-    s_turn.texts = texts;
-    s_turn.gen = gen;
+    {
+        turn_lock_t lk;
+        uint8_t *chunk = s_turn.chunk, *mp3 = s_turn.mp3, *note = s_turn.note;
+        char *texts = s_turn.texts;
+        s_turn = turn_t{};
+        s_turn.chunk = chunk;
+        s_turn.mp3 = mp3;
+        s_turn.note = note;
+        s_turn.texts = texts;
+        s_turn.gen = gen;
 #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER || CONFIG_MUSE_LATEST_REPLY
-    s_turn.review = muse_review_turn();
+        s_turn.review = muse_review_turn();
 #endif
-    s_turn.text = text;
-    s_turn.tts_msg = -1;
+        s_turn.text = text;
+        s_turn.tts_msg = -1;
+    }
     memset(s_marks, 0, sizeof(s_marks));
     s_reply_shown[0] = '\0';
     s_turn.start_us = now_us();
@@ -1413,6 +1428,7 @@ static int bind_msg(const char *id, cJSON *payload)
     if (s_turn.nmsgs == MAX_MSGS) {
         return -1;
     }
+    turn_lock_t lk;
     msg_t &m = s_turn.msgs[s_turn.nmsgs];
     m = msg_t{};
     strlcpy(m.id, id, sizeof(m.id));
@@ -1436,6 +1452,7 @@ static size_t whole_chars(const char *s, size_t n)
 
 static void append_text(msg_t &m, const char *text)
 {
+    turn_lock_t lk;
     size_t add = strlen(text);
     if (s_turn.texts) {
         char *full = s_turn.texts + (&m - s_turn.msgs) * TEXT_MAX;
@@ -1700,9 +1717,13 @@ static void turn_detach(void)
     ESP_LOGI(TAG, "no reply after %d s: telling the user, and waiting in the background", (int)(DETACH_US / 1000000));
     char notice[128];
     strlcpy(notice, "Muse is working on it. I'll tell you when it's done.", sizeof(notice));
-    int i = s_turn.nmsgs++;
-    s_turn.msgs[i] = msg_t{};
-    strlcpy(s_turn.msgs[i].id, "local-notice", sizeof(s_turn.msgs[i].id));
+    int i;
+    {
+        turn_lock_t lk;
+        i = s_turn.nmsgs++;
+        s_turn.msgs[i] = msg_t{};
+        strlcpy(s_turn.msgs[i].id, "local-notice", sizeof(s_turn.msgs[i].id));
+    }
     s_turn.detached = true;
     s_turn.last_event_us = s_turn.last_content_us = now_us();
     add_reply_text(i, notice);
@@ -1869,15 +1890,18 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
-        m.pcm_start = s_turn.pcm_out;
-        /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
-         * was kept at reading pace, not stretched over the whole reply's time
-         * (the Watcher keeps the rest for review). */
-        size_t shown = s_turn.texts ? CAPTION_LEN(s_turn.texts + i * TEXT_MAX) : m.len;
-        m.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
-        m.tts = TTS_ACTIVE;
-        s_turn.tts_msg = i;
-        s_turn.silent = true;
+        {
+            turn_lock_t lk;
+            m.pcm_start = s_turn.pcm_out;
+            /* Paced to the text kept: a reply longer than CAPTION_TEXT shows what
+             * was kept at reading pace, not stretched over the whole reply's time
+             * (the Watcher keeps the rest for review). */
+            size_t shown = s_turn.texts ? CAPTION_LEN(s_turn.texts + i * TEXT_MAX) : m.len;
+            m.pcm_frames = (uint32_t)(shown * MIC_RATE / TEXT_CHARS_PER_S);
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.silent = true;
+        }
         ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
         show_reply_start(m);
         return;
@@ -1905,6 +1929,7 @@ static void tts_end(stream_t *s, bool ok)
     if (ok) {
         s_turn.mp3_ended = true;   /* decode() drains the rest, then finishes */
     } else {
+        turn_lock_t lk;
         s_turn.msgs[i].tts = TTS_FINISHED;
         s_turn.tts_msg = -1;
     }
@@ -1922,6 +1947,7 @@ static void pace_silently(void)
         s_turn.pcm_out += n;
     }
     if (s_turn.pcm_out >= end) {
+        turn_lock_t lk;
         m.pcm_end = s_turn.pcm_out;
         m.tts = TTS_FINISHED;
         s_turn.tts_msg = -1;
@@ -1982,17 +2008,20 @@ static void decode(void)
         memmove(s_turn.mp3, s_turn.mp3 + off, s_turn.mp3_len - off);
         s_turn.mp3_len -= off;
     }
-    msg_t &m = s_turn.msgs[s_turn.tts_msg];
-    if (s_turn.mp3_ended && s_turn.kbps > 0) {
-        /* All of it is here: what's decoded plus what the bitrate says the rest holds. */
-        uint32_t rest = (uint32_t)((uint64_t)s_turn.mp3_len * 8 * MIC_RATE / (s_turn.kbps * 1000));
-        m.pcm_frames = s_turn.pcm_out - m.pcm_start + rest;
-    }
-    if (s_turn.mp3_ended && !s_turn.mp3_len) {
-        m.pcm_end = s_turn.pcm_out;
-        m.pcm_frames = s_turn.pcm_out - m.pcm_start;
-        m.tts = TTS_FINISHED;
-        s_turn.tts_msg = -1;
+    {
+        turn_lock_t lk;
+        msg_t &m = s_turn.msgs[s_turn.tts_msg];
+        if (s_turn.mp3_ended && s_turn.kbps > 0) {
+            /* All of it is here: what's decoded plus what the bitrate says the rest holds. */
+            uint32_t rest = (uint32_t)((uint64_t)s_turn.mp3_len * 8 * MIC_RATE / (s_turn.kbps * 1000));
+            m.pcm_frames = s_turn.pcm_out - m.pcm_start + rest;
+        }
+        if (s_turn.mp3_ended && !s_turn.mp3_len) {
+            m.pcm_end = s_turn.pcm_out;
+            m.pcm_frames = s_turn.pcm_out - m.pcm_start;
+            m.tts = TTS_FINISHED;
+            s_turn.tts_msg = -1;
+        }
     }
 }
 
@@ -2239,7 +2268,9 @@ static bool poll_socket(void)
             return true;
         }
 #if CONFIG_MUSE_REALTIME_VOICE
-        if (muse_voice_call_rx_full()) {
+        /* 语音缓冲短暂满载时退避读取以施加 TCP 背压；若已接近心跳周期仍无收包，
+         * 则放行读取以处理 WebSocket ping/pong 保活，防止误判断线。 */
+        if (muse_voice_call_rx_full() && now_us() - s_conn.last_rx_us < PING_US / 2) {
             return true;   /* the voice task is behind on the call's audio */
         }
 #endif
@@ -2511,6 +2542,11 @@ extern "C" void muse_hatch_start(void)
         s.line = static_cast<char *>(psram_alloc(NDJSON_LINE_MAX));
         s.cap = NDJSON_LINE_MAX;
     }
+#ifdef ESP_PLATFORM
+    s_turn_mu = xSemaphoreCreateMutexStatic(&s_turn_mu_buf);
+#else
+    s_turn_mu = xSemaphoreCreateMutex();
+#endif
     s_turn.tts_msg = -1;
 #if CONFIG_MUSE_REALTIME_VOICE
     muse_voice_call_init();   /* calls stay unavailable if it fails; notes still work */
@@ -2684,6 +2720,7 @@ static uint32_t reply_frames(const msg_t &m, size_t caption_len)
 
 extern "C" float muse_turn_progress(size_t played, int *message)
 {
+    turn_lock_t lk;
     int i = reply_message_at(played);
     if (message) *message = i;
     if (i < 0) return 0;
@@ -2700,6 +2737,7 @@ extern "C" float muse_turn_progress(size_t played, int *message)
 
 extern "C" bool muse_hatch_turn_caption(size_t played, char *out, size_t cap)
 {
+    turn_lock_t lk;
     if (!s_turn.texts) return false;
     int i = reply_message_at(played);
     const msg_t *m = i >= 0 ? &s_turn.msgs[i] : nullptr;
