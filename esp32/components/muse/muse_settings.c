@@ -54,7 +54,7 @@ static struct {
     .volume = CONFIG_MUSE_DEFAULT_VOLUME,
     .speaker_on = true,
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
-    .mic_gain = 24,
+    .mic_gain = 18,
 #else
     .mic_gain = 30,
 #endif

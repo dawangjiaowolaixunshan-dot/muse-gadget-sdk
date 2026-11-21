@@ -1617,11 +1617,12 @@ static bool caption_is(const char *caption, const char *en)
 static void update_portrait(muse_mode_t mode, float now)
 {
     static char caption[MUSE_CAPTION_MAX];
-    static float problem_until;
+    static float problem_until, retry_until;
     static const char *notice;
     static int last_lit = -1;
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
     if (fresh) {
+        if (caption_is(caption, "HOLD LONGER TO TALK")) retry_until = now + 1.5f;
         bool no_reply = caption_is(caption, "MUSE DIDN'T ANSWER");
         bool unreachable = caption_is(caption, "CAN'T REACH MUSE");
         bool failed = caption_is(caption, "CALL FAILED") ||
@@ -1651,7 +1652,7 @@ static void update_portrait(muse_mode_t mode, float now)
         text = "声音已开启";
         hint = false;
     } else if (hint && caption_is(caption, "HOLD LONGER TO TALK")) {
-        text = "请再试一试";
+        if (now < retry_until) text = "请再试一试";
         hint = false;
     }
     bool listen = call == MUSE_VOICE_VIEW_LISTENING || (call == MUSE_VOICE_VIEW_NONE && mode == MUSE_MODE_LISTENING);

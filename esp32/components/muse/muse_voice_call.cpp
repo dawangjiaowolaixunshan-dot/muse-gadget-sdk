@@ -244,7 +244,6 @@ static constexpr int64_t WATCH_NO_TURN_TIMEOUT_US = 6500000;
 static int64_t s_watch_reply_deadline;
 static int64_t s_watch_turn_deadline;
 static bool s_watch_waiting_after_release;
-static uint32_t s_press_samples;
 // Counts only. Keep the mic samples and transcript out of the console log.
 static struct {
     unsigned mic_samples, mic_peak, sent, turns, replies, suppressed, incoming_audio, rejected_audio;
@@ -253,13 +252,15 @@ static struct {
 static void soft_limit_mic(int16_t *pcm, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
-        int v = pcm[i];
-        int a = v < 0 ? -v : v;
-        if (a > 18000) {
-            a = 18000 + (a - 18000) / 3;
-            if (a > 27500) a = 27500;
-            pcm[i] = static_cast<int16_t>(v < 0 ? -a : a);
+        /* 在纯净 18dB 硬件模拟信号上施加 1.35x 温和数字增益与平滑软限幅 */
+        int32_t v = static_cast<int32_t>(pcm[i]) * 27 / 20;
+        int32_t a = v < 0 ? -v : v;
+        if (a > 20000) {
+            a = 20000 + (a - 20000) / 3;
+            if (a > 27000) a = 27000;
+            v = v < 0 ? -a : a;
         }
+        pcm[i] = static_cast<int16_t>(v);
     }
 }
 #endif
@@ -765,7 +766,6 @@ static void ptt_pressed(uint32_t press)
     s_watch_turn_deadline = 0;
     s_watch_waiting_after_release = false;
     s_live_trace.mic_peak = 0;
-    s_press_samples = 0;
 #endif
     muse_vc_resampler_init(&s_down, MUSE_VC_WIRE_RATE, MUSE_VC_MIC_RATE);   /* no edge carried from the old reply */
     s_st &= ~(ST_REPLY_AUDIO | ST_REPLY_DONE | ST_REPLY_LOST | ST_HEARD);
@@ -1102,17 +1102,6 @@ static bool pump_ptt(int64_t now)
 #if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH
             if (s_mic_len) {
                 soft_limit_mic(s_mic, s_mic_len);
-                s_press_samples += static_cast<uint32_t>(s_mic_len);
-                if (!s_talk && xStreamBufferBytesAvailable(s_in) == 0 && s_press_samples > 6400) {
-                    /* 松键收尾末块线性淡出至零，抹平微动开关壳体回弹杂音 */
-                    size_t fade_n = s_mic_len < 960 ? s_mic_len : 960;
-                    size_t start = s_mic_len - fade_n;
-                    for (size_t k = 0; k < fade_n; k++) {
-                        s_mic[start + k] = static_cast<int16_t>(
-                            static_cast<int32_t>(s_mic[start + k]) * static_cast<int32_t>(fade_n - 1 - k) /
-                            static_cast<int32_t>(fade_n));
-                    }
-                }
             }
 #endif
         }
