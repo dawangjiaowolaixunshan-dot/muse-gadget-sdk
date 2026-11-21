@@ -434,17 +434,25 @@ __attribute__((weak)) bool muse_pixel_whole_frame(bool *changed)
     return false;
 }
 
+#if STOPWATCH_PORTRAIT
+static bool s_watch_compact;
+#endif
+
 static void invalidate_muse(void)
 {
     bool changed;
     if (muse_pixel_whole_frame(&changed)) {
         if (changed) {
 #if STOPWATCH_PORTRAIT
-            /* The warm backdrop is static outside the avatar's motion area. */
-            lv_area_t canvas;
-            lv_obj_get_coords(s_canvas, &canvas);
-            lv_area_t art = { canvas.x1 + 72, canvas.y1, canvas.x2, canvas.y1 + 432 };
-            lv_obj_invalidate_area(s_canvas, &art);
+            /* 通话小图（236×236）模式下刷新整个画布，仅全屏大图模式跳过左侧 72 像素静态背景 */
+            if (s_watch_compact) {
+                lv_obj_invalidate(s_canvas);
+            } else {
+                lv_area_t canvas;
+                lv_obj_get_coords(s_canvas, &canvas);
+                lv_area_t art = { canvas.x1 + 72, canvas.y1, canvas.x2, canvas.y1 + 432 };
+                lv_obj_invalidate_area(s_canvas, &art);
+            }
 #else
             lv_obj_invalidate(s_canvas);
 #endif
@@ -1382,7 +1390,7 @@ static void on_volume_swipe(lv_event_t *e)
 LV_FONT_DECLARE(stopwatch_face_font);
 static lv_obj_t *s_portrait_footer, *s_portrait_meter, *s_portrait_bars[5];
 static lv_obj_t *s_watch_captions, *s_watch_history, *s_watch_history_list;
-static bool s_watch_compact, s_watch_history_open;
+static bool s_watch_history_open;
 static uint32_t s_watch_history_revision;
 
 typedef struct {
@@ -1398,11 +1406,11 @@ static void watch_caption_row_create(lv_obj_t *parent, watch_caption_row_t *row)
     row->row = lv_obj_create(parent);
     lv_obj_remove_style_all(row->row);
     lv_obj_remove_flag(row->row, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(row->row, 306, 84);
+    lv_obj_set_size(row->row, 290, 84);
     row->role = make_label(row->row, caption_font(), 0xeea396);
     row->body = make_label(row->row, caption_font(), 0xffead7);
     lv_label_set_long_mode(row->body, LV_LABEL_LONG_MODE_WRAP);
-    lv_obj_set_width(row->body, 306);
+    lv_obj_set_width(row->body, 290);
     lv_obj_set_style_text_line_space(row->body, 3, 0);
     lv_obj_set_y(row->body, 19);
 }
@@ -1514,7 +1522,7 @@ static void watch_caption_tick(void)
     int left = elapsed >= 750 ? 0 : 750 - elapsed;
     int remainder = left * left * 255 / (750 * 750);
     lv_point_t size = {0};
-    lv_text_get_size(&size, view.previous.text, caption_font(), 0, 3, 306, LV_TEXT_FLAG_NONE);
+    lv_text_get_size(&size, view.previous.text, caption_font(), 0, 3, 290, LV_TEXT_FLAG_NONE);
     int row_height = LV_CLAMP(44, size.y + 27, 84);
     int travel = remainder * row_height / 255;
     watch_caption_position(&s_watch_rows[0], 43 - row_height + travel, 84 + remainder * 143 / 255);
@@ -1563,7 +1571,9 @@ static void build_portrait_footer(lv_obj_t *face)
     s_watch_captions = lv_obj_create(face);
     lv_obj_remove_style_all(s_watch_captions);
     lv_obj_remove_flag(s_watch_captions, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(s_watch_captions, 306, 128);
+    /* 宽度收窄至 290 适配 466 圆屏底弧弦长，开启边界裁剪避免滚动时越出容器下缘 */
+    lv_obj_set_size(s_watch_captions, 290, 126);
+    lv_obj_set_style_clip_corner(s_watch_captions, true, 0);
     lv_obj_align(s_watch_captions, LV_ALIGN_TOP_MID, 0, 265);
     lv_obj_add_flag(s_watch_captions, LV_OBJ_FLAG_HIDDEN);
     for (size_t i = 0; i < sizeof(s_watch_rows) / sizeof(s_watch_rows[0]); i++) {

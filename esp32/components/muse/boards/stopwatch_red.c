@@ -104,7 +104,8 @@ static bool decode(int target, bool returning, bool live)
     if (target > s_frame && first <= s_frame) first = s_frame + 1;
     /* Catch up over multiple UI ticks during a call. Two consecutive decodes
      * can take longer than one frame interval on the StopWatch. */
-    int last = returning ? target : min_int(target, first + (live ? 0 : 1));
+    int last = returning ? (target - first > 2 ? first : target)
+                         : min_int(target, first + (live ? 0 : 1));
     int64_t start = esp_timer_get_time();
     int side = clip->side;
     muse_pic_t pic;
@@ -253,9 +254,16 @@ void muse_pixel_render(const muse_pose_t *p)
     }
     if (frame != s_frame) {
         if (!decode(frame, s_returning, p->in_call)) {
-            ESP_LOGE(TAG, "could not decode %s frame %d", CLIP_NAME[s_clip], frame);
-            s_failed = true;
-            s_dirty = true;
+            /* 解码偶发失败时重建解码器并重置帧状态，允许后续切段/关键帧自动恢复，避免永久黑屏 */
+            ESP_LOGW(TAG, "could not decode %s frame %d, resetting decoder", CLIP_NAME[s_clip], frame);
+            muse_vdec_close(s_codec);
+            s_codec = muse_vdec_open(MUSE_VIDEO_CODEC_H264, RED_SIZE, RED_SIZE);
+            s_frame = -1;
+            s_returning = false;
+            if (!s_codec) {
+                s_failed = true;
+                s_dirty = true;
+            }
             return;
         }
         ++s_total_frames;
