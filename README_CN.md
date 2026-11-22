@@ -78,6 +78,6 @@ idf.py -p /dev/cu.usbmodemXXXX app-flash
 
 ## 开源协议与致谢
 
-- **中文增强分支主导与实测**：[@dlandwt-dotcom](https://github.com/dlandwt-dotcom)（协作开发：Google Antigravity & Claude Code）
+- **中文增强分支主导与实测**：[@dawangjiaowolaixunshan-dot](https://github.com/dawangjiaowolaixunshan-dot)（协作开发：Google Antigravity & Claude Code）
 - 本项目基于 Meta Platforms, Inc. 开源的 [`facebookincubator/muse-gadget-sdk`](https://github.com/facebookincubator/muse-gadget-sdk) 二次开发。
 - 遵循原仓库的 **Apache License 2.0** 协议，详见 [LICENSE](LICENSE)。
